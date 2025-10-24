@@ -1,150 +1,172 @@
 import pandas as pd
 from sqlalchemy.orm import Session
-from sqlalchemy import exc
-import models  # Import our models
-import database  # Import our database setup
+from database import engine, Base, SessionLocal
+from models import User, Movie, Rating
 import os
+import requests
+import time
 
-# --- THIS IS THE NEW FIX ---
-# Get the absolute path to the 'backend' directory
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-# Get the absolute path to the parent (root) directory
-ROOT_DIR = os.path.dirname(BASE_DIR)
+# --- ACTION REQUIRED ---
+# Make sure your TMDB API Key is pasted here.
+TMDB_API_KEY = "3d6e88772209e5b056e87d99b455595d" 
+# ---------------------
 
-# Define file paths relative to the 'backend' folder
-MOVIES_CSV = os.path.join(BASE_DIR, 'movies.csv')
-RATINGS_CSV = os.path.join(BASE_DIR, 'ratings.csv')
-# Define the database path in the ROOT folder
-DATABASE_FILE = os.path.join(ROOT_DIR, 'movies.db')
-# --- END OF FIX ---
+TMDB_BASE_URL = "https://api.themoviedb.org/3"
+TMDB_POSTER_BASE_URL = "https://image.tmdb.org/t/p/w500"
 
-# Get the database engine and session maker
-engine = database.engine
-SessionLocal = database.SessionLocal
+# Define file paths (looking in the root folder)
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_FILE = os.path.join(os.path.dirname(ROOT_DIR), "movies.db")
+RATINGS_CSV = os.path.join(ROOT_DIR, "ratings.csv")
+MOVIES_CSV = os.path.join(ROOT_DIR, "movies.csv")
+LINKS_CSV = os.path.join(ROOT_DIR, "links.csv")
 
-# ... (rest of the file is identical) ...
+def get_movie_details(tmdb_id):
+    """Fetches movie details from TMDB, including the poster path."""
+    if pd.isna(tmdb_id):
+        return None, None # No TMDB ID
 
-def clean_title(title):
-    """
-    Cleans the movie title, extracts year if present.
-    Example: "Toy Story (1995)" -> title="Toy Story", year=1995
-    Example: "Grumpier Old Men (1995)" -> title="Grumpier Old Men", year=1995
-    Example: "Heat (1995)" -> title="Heat", year=1995
-    """
-    import re
-    year_match = re.search(r'\((\d{4})\)$', title)
-    year = None
-    if year_match:
-        year = int(year_match.group(1))
-        # Remove the year part from the title string
-        title = title[:year_match.start()].strip()
-    return title, year
+    try:
+        url = f"{TMDB_BASE_URL}/movie/{int(tmdb_id)}?api_key={TMDB_API_KEY}"
+        response = requests.get(url)
+        response.raise_for_status() # Raise an error for bad responses (4xx, 5xx)
+        
+        data = response.json()
+        poster_path = data.get('poster_path')
+        description = data.get('overview')
+        
+        full_poster_url = f"{TMDB_POSTER_BASE_URL}{poster_path}" if poster_path else None
+        
+        return full_poster_url, description
+
+    except requests.exceptions.RequestException as e:
+        # Don't print an error for 404, it just means the movie isn't in TMDB
+        if e.response.status_code != 404:
+            print(f"Error fetching data for tmdbId {tmdb_id}: {e}")
+        return None, None
+    except Exception as e:
+        print(f"Error processing tmdbId {tmdb_id}: {e}")
+        return None, None
+
 
 def seed_database():
-    """
-    Loads data from MovieLens CSVs into the SQLite database.
-    """
+    print("Starting database seeding process...")
     
-    # Drop and recreate all tables
-    print("Dropping all existing tables...")
-    models.Base.metadata.drop_all(bind=engine)
-    print("Creating new database tables...")
-    models.Base.metadata.create_all(bind=engine)
+    # Recreate all tables
+    print("Dropping and recreating all database tables...")
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
 
-    db: Session = SessionLocal()
+    db = SessionLocal()
     
     try:
         # --- Load Movies ---
-        print(f"Loading movies from {MOVIES_CSV}...")
+        print(f"Loading movies from {MOVIES_CSV}")
+        print(f"Loading links from {LINKS_CSV}")
+        
         movies_df = pd.read_csv(MOVIES_CSV)
+        links_df = pd.read_csv(LINKS_CSV)
+
+        movies_df = pd.merge(movies_df, links_df, on='movieId', how='left')
+        
         movie_count = 0
-        for _, row in movies_df.iterrows():
-            title, year = clean_title(row['title'])
+        for index, row in movies_df.iterrows():
+            title = row['title'].strip()
+            release_year = None
+            if title.endswith(')'):
+                try:
+                    year_str = title[-5:-1]
+                    if year_str.isdigit():
+                        release_year = int(year_str)
+                        title = title[:-7].strip() 
+                except:
+                    pass 
             
-            # Handle the (no genres listed) case
-            genres = row['genres'] if row['genres'] != '(no genres listed)' else None
+            tmdb_id = row.get('tmdbId') 
+            poster_url, description = get_movie_details(tmdb_id)
             
-            movie = models.Movie(
+            movie = Movie(
                 id=int(row['movieId']),
                 title=title,
-                release_year=year,
-                genres=genres
-                # Description will be null as it's not in the CSV
+                release_year=release_year,
+                genres=row['genres'],
+                description=description,
+                poster_url=poster_url
             )
             db.add(movie)
             movie_count += 1
-        
-        # Commit all movies at once
+
+            if movie_count % 100 == 0:
+                print(f"Processed {movie_count} movies...")
+                
+            time.sleep(0.05) 
+
+        print(f"Committing {movie_count} movies to database...")
         db.commit()
         print(f"Successfully processed and added {movie_count} movies.")
         
         # --- Load Ratings (and Users) ---
-        print(f"Loading ratings from {RATINGS_CSV}...")
+        print(f"Loading ratings from {RATINGS_CSV}")
         ratings_df = pd.read_csv(RATINGS_CSV)
         
-        # Get all unique user IDs from the ratings file
         user_ids = ratings_df['userId'].unique()
         user_count = 0
-        # Create user objects for all users
         for user_id in user_ids:
-            user = models.User(
-                id=int(user_id)
-                # username, email, password will be null
+            new_user = User(
+                id=int(user_id),
+                username=f"user_{int(user_id)}",
+                email=f"user{int(user_id)}@movierec.com",
+                hashed_password="default_hash" 
             )
-            db.add(user)
+            db.add(new_user)
             user_count += 1
-            
-        # Commit all users at once
-        db.commit()
-        print(f"Successfully added {user_count} users.")
         
-        # Now add all ratings
+        print(f"Committing {user_count} users...")
+        db.commit()
+        print(f"Successfully processed and added {user_count} users.")
+
+        print("Adding ratings (this may take a moment)...")
         rating_count = 0
-        for _, row in ratings_df.iterrows():
-            rating = models.Rating(
+        for index, row in ratings_df.iterrows():
+            #
+            # --- THIS IS THE FIX ---
+            #
+            rating = Rating(
                 user_id=int(row['userId']),
                 movie_id=int(row['movieId']),
-                score=float(row['rating'])
-                # timestamp is ignored
+                score=float(row['rating']) # <-- WAS 'score', NOW 'rating'
             )
             db.add(rating)
             rating_count += 1
             
-            # Commit in batches of 10,000 for performance
             if rating_count % 10000 == 0:
-                db.commit()
                 print(f"Committed {rating_count} ratings...")
-        
-        # Commit any remaining ratings
+                db.commit()
+
+        print(f"Committing final batch of ratings...")
         db.commit()
         print(f"Successfully processed and added {rating_count} ratings.")
+
+        print("\nDatabase seeding complete!")
         
-        print("\n--- Database seeding complete! ---")
-        
-    except FileNotFoundError as e:
-        db.rollback()
-        print(f"\n--- ERROR ---")
-        print(f"Could not find file: {e.filename}")
-        print("Please make sure 'movies.csv' and 'ratings.csv' are in the 'backend' folder.")
-    except exc.IntegrityError as e:
-        db.rollback()
-        print(f"\n--- ERROR ---")
-        print(f"An integrity error occurred (e.g., duplicate key): {e}")
     except Exception as e:
+        print(f"An error occurred: {e}")
         db.rollback()
-        print(f"\n--- ERROR ---")
-        print(f"An unexpected error occurred: {e}")
     finally:
         db.close()
 
 if __name__ == "__main__":
-    # Check if DB file exists and ask for confirmation
-    if os.path.exists(DATABASE_FILE):
-        print(f"WARNING: Database file '{DATABASE_FILE}' already exists.")
-        confirm = input("This will DELETE all existing data. Continue? (y/n): ")
-        if confirm.lower() != 'y':
-            print("Seeding aborted.")
-            exit()
-    
-    seed_database()
+    if not TMDB_API_KEY or TMDB_API_KEY == "3d6e88772209e5b056e87d99b455595d":
+        print("="*50)
+        print("ERROR: Please paste your TMDB API key into the 'TMDB_API_KEY' variable in seed.py")
+        print("="*50)
+    else:
+        if os.path.exists(DB_FILE):
+            print(f"WARNING: Database file '{DB_FILE}' already exists.")
+            confirm = input("This will DELETE all existing data. Continue? (y/n): ")
+            if confirm.lower() != 'y':
+                print("Seeding aborted.")
+                exit()
+        
+        seed_database()
 

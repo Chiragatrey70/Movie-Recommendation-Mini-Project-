@@ -200,18 +200,30 @@ function MovieList({ movies, onMovieSelect }) {
   );
 }
 
+// --- UPDATED MOVIE CARD ---
 function MovieCard({ movie, onMovieSelect }) {
-  // Extract just the first genre if it exists
   const mainGenre = movie.genres ? movie.genres.split('|')[0] : 'Movie';
 
   return (
     <div
       onClick={() => onMovieSelect(movie)}
-      className="bg-gray-800 rounded-lg shadow-lg overflow-hidden cursor-pointer transform transition-transform duration-300 hover:scale-105 hover:shadow-yellow-400/20"
+      className="bg-gray-800 rounded-lg shadow-lg overflow-hidden cursor-pointer transform transition-transform duration-300 hover:scale-105 hover:shadow-yellow-400/20 group"
     >
-      <div className="h-64 bg-gray-700 flex items-center justify-center overflow-hidden p-4">
-        {/* Simple text fallback for movie 'poster' */}
-        <span className="text-xl font-bold text-center px-2 text-yellow-400">{movie.title}</span>
+      <div className="aspect-[2/3] w-full bg-gray-700 flex items-center justify-center overflow-hidden">
+        {movie.poster_url ? (
+          <img 
+            src={movie.poster_url} 
+            alt={movie.title} 
+            className="w-full h-full object-cover transition-opacity duration-300 group-hover:opacity-75"
+            // Handle image load errors
+            onError={(e) => { e.target.style.display = 'none'; }}
+          />
+        ) : (
+          // Fallback if no poster URL
+          <div className="w-full h-full flex items-center justify-center p-4">
+            <span className="text-lg font-bold text-center text-yellow-400">{movie.title}</span>
+          </div>
+        )}
       </div>
       <div className="p-4">
         <h3 className="font-bold text-lg truncate" title={movie.title}>{movie.title}</h3>
@@ -223,27 +235,39 @@ function MovieCard({ movie, onMovieSelect }) {
 
 function MovieModal({ movie, onClose, onRate, existingRating }) {
   return (
-    <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
-      <div className="bg-gray-800 rounded-lg shadow-2xl w-full max-w-lg relative"
-           onClick={(e) => e.stopPropagation()}
+    <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4 overflow-y-auto">
+      <div 
+        className="bg-gray-800 rounded-lg shadow-2xl w-full max-w-lg relative my-8"
+        onClick={(e) => e.stopPropagation()}
       >
         <button
           onClick={onClose}
-          className="absolute top-3 right-3 text-gray-400 hover:text-white text-2xl"
+          className="absolute top-3 right-3 text-gray-400 hover:text-white text-3xl z-10"
         >
           &times;
         </button>
         
-        <div className="p-8">
+        {/* Poster inside the modal */}
+        <div className="w-full h-48 bg-gray-700 rounded-t-lg overflow-hidden relative">
+          {movie.poster_url && (
+            <img 
+              src={movie.poster_url} 
+              alt="" 
+              className="w-full h-full object-cover object-top opacity-30"
+            />
+          )}
+           <div className="absolute inset-0 bg-gradient-to-t from-gray-800 via-gray-800/80 to-transparent"></div>
+        </div>
+        
+        <div className="p-8 pt-0 -mt-24 relative z-0">
           <h2 className="text-3xl font-bold mb-2 text-yellow-400">{movie.title} ({movie.release_year})</h2>
           <p className="text-gray-400 mb-4">{movie.genres ? movie.genres.split('|').join(', ') : ''}</p>
           <p className="text-gray-300 mb-6">{movie.description || "No description available."}</p>
           
-          <div className="bg-gray-700 p-4 rounded-lg">
+          <div className="bg-gray-700/50 p-4 rounded-lg">
             <h3 className="text-xl font-semibold mb-3">
               {existingRating > 0 ? "Update your rating" : "Rate this movie"}
             </h3>
-            {/* Pass the existing rating to the StarRating component */}
             <StarRating initialRating={existingRating} onSetRating={onRate} />
           </div>
         </div>
@@ -255,7 +279,6 @@ function MovieModal({ movie, onClose, onRate, existingRating }) {
 }
 
 function StarRating({ initialRating = 0, onSetRating }) {
-  // Set the initial state to the user's existing rating
   const [rating, setRating] = useState(initialRating);
   const [hoverRating, setHoverRating] = useState(0);
 
@@ -264,7 +287,6 @@ function StarRating({ initialRating = 0, onSetRating }) {
     onSetRating(rate);
   };
   
-  // This ensures the stars are filled in when the modal opens
   useEffect(() => {
     setRating(initialRating);
   }, [initialRating]);

@@ -32,7 +32,6 @@ class RatingResponse(RatingBase):
     class Config:
         from_attributes = True
 
-# A simpler response for the user ratings list
 class UserRatingResponse(BaseModel):
     movie_id: int
     score: float
@@ -46,11 +45,10 @@ class MovieBase(BaseModel):
     description: Optional[str] = None
     release_year: Optional[int] = None
     genres: Optional[str] = None
+    poster_url: Optional[str] = None # <-- ADDED THIS
 
 class MovieResponse(MovieBase):
     id: int
-    # We'll remove ratings from this to keep it fast
-    # ratings: List[RatingResponse] = [] 
     
     class Config:
         from_attributes = True
@@ -61,13 +59,11 @@ class UserBase(BaseModel):
     email: Optional[str] = None
 
 class UserCreate(UserBase):
-    id: Optional[int] = None # Allow specifying ID for our new logic
-    password: str = "default" # Add default for simplicity
+    id: Optional[int] = None
+    password: str = "default"
 
 class UserResponse(UserBase):
     id: int
-    # We'll remove ratings from this to keep it fast
-    # ratings: List[RatingResponse] = []
     
     class Config:
         from_attributes = True
@@ -76,27 +72,25 @@ class UserResponse(UserBase):
 
 app = FastAPI(
     title="Movie Recommendation API",
-    description="Full-stack API with real data and background model training.",
-    version="4.0.0" # Final version!
+    description="Full-stack API with real data, TMDB posters, and background model training.",
+    version="5.0.0" # Poster version!
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Allows all origins (for development)
+    allow_origins=["*"], 
     allow_credentials=True,
-    allow_methods=["*"], # Allows all methods
-    allow_headers=["*"], # Allows all headers
+    allow_methods=["*"], 
+    allow_headers=["*"], 
 )
 
 # --- Startup Event ---
 @app.on_event("startup")
 def on_startup():
-    # Create all database tables
     Base.metadata.create_all(bind=engine)
     
     db = next(get_db())
     try:
-        # Check if the database is populated
         movie_count = db.query(models.Movie).count()
         if movie_count == 0:
             print("--------------------------------------------------")
@@ -107,7 +101,6 @@ def on_startup():
         else:
             print(f"Database already populated with {movie_count} movies.")
         
-        # --- Train the ML model on startup ---
         print("Training collaborative filtering model...")
         ml_engine.train_collaborative_model(db)
 
@@ -120,20 +113,15 @@ def on_startup():
 
 @app.get("/", summary="Root")
 def read_root():
-    return {"message": "Welcome to the Movie Recommendation API (v4.0)"}
+    return {"message": "Welcome to the Movie Recommendation API (v5.0)"}
 
 @app.post("/users/", response_model=UserResponse, summary="Create User")
 def create_user(user: UserCreate, db: Session = Depends(get_db)):
-    """
-    Creates a new user. Since we're not auto-incrementing, we find the
-    next available ID.
-    """
     if user.id:
          db_user = db.query(models.User).filter(models.User.id == user.id).first()
          if db_user:
              raise HTTPException(status_code=400, detail="User ID already exists")
     else:
-        # Find max ID and add 1
         max_id = db.query(models.User.id).order_by(models.User.id.desc()).first()
         new_id = (max_id[0] if max_id else 0) + 1
         user.id = new_id
@@ -166,7 +154,7 @@ def get_movies(
 def get_movie_by_id(movie_id: int, db: Session = Depends(get_db)):
     movie = db.query(models.Movie).filter(models.Movie.id == movie_id).first()
     if not movie:
-        raise HTTPException(status_code=4404, detail="Movie not found")
+        raise HTTPException(status_code=404, detail="Movie not found")
     return movie
 
 @app.post("/ratings/", response_model=RatingResponse, summary="Rate a Movie")
@@ -175,10 +163,6 @@ def create_or_update_rating(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db)
 ):
-    """
-    Create a new rating or update an existing one.
-    Triggers model retraining in the background.
-    """
     user = db.query(models.User).filter(models.User.id == rating.user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -209,9 +193,6 @@ def create_or_update_rating(
 
 @app.get("/recommendations/{user_id}", response_model=List[MovieResponse], summary="Get Hybrid Recommendations")
 def get_recommendations(user_id: int, db: Session = Depends(get_db)):
-    """
-    Get hybrid recommendations for a user.
-    """
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -233,22 +214,12 @@ def get_recommendations(user_id: int, db: Session = Depends(get_db)):
     
     return ordered_recs
 
-# --- THIS IS THE NEW ENDPOINT ---
 @app.get("/users/{user_id}/ratings", response_model=List[UserRatingResponse], summary="Get All Ratings for a User")
 def get_user_ratings(user_id: int, db: Session = Depends(get_db)):
-    """
-    Gets all movie ratings for a specific user.
-    """
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
         
     ratings = db.query(models.Rating).filter(models.Rating.user_id == user_id).all()
     return ratings
-
-# --- Run the App ---
-if __name__ == "__main__":
-    print("--- Starting FastAPI Server (v4.0 - User Ratings) ---")
-    print("Access the API docs at http://127.0.0.1:8000/docs")
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
 
