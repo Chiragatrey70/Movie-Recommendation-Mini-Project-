@@ -3,19 +3,150 @@ import axios from 'axios';
 
 // --- Constants ---
 const API_URL = "http://127.0.0.1:8000";
-const USER_ID = 1; // We'll hardcode user 1 for now
 
-// --- Main App Component ---
+// --- Axios API Client ---
+// Create a global API client instance
+// This is better than using axios.get() everywhere
+const apiClient = axios.create({
+  baseURL: API_URL,
+});
+
+// Use an "interceptor" to automatically add the auth token to every request
+apiClient.interceptors.request.use(
+  (config) => {
+    const token = localStorage.getItem('token');
+    if (token) {
+      // Add the "Authorization: Bearer <token>" header
+      config.headers['Authorization'] = `Bearer ${token}`;
+    }
+    return config;
+  },
+  (error) => {
+    return Promise.reject(error);
+  }
+);
+
+
+// --- Main App Component (Now an Auth Router) ---
 export default function App() {
+  // Page state: 'login', 'register', or 'app'
+  const [page, setPage] = useState('login'); 
+  const [token, setToken] = useState(localStorage.getItem('token'));
+  const [currentUser, setCurrentUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true); // Show spinner on initial load
+
+  // --- Auth Effect ---
+  // On load, check if we have a token and if it's valid
+  useEffect(() => {
+    const validateToken = async () => {
+      if (token) {
+        try {
+          // apiClient automatically uses the token from localStorage
+          // We call the new /users/me endpoint to get our own user details
+          const response = await apiClient.get('/users/me');
+          setCurrentUser(response.data);
+          setPage('app'); // If token is valid, go to the app
+        } catch (error) {
+          // Token is invalid or expired
+          console.error("Token validation failed:", error);
+          localStorage.removeItem('token');
+          setToken(null);
+          setCurrentUser(null);
+          setPage('login'); // Go to login
+        }
+      } else {
+        setPage('login'); // No token, go to login
+      }
+      setAuthLoading(false); // Done checking, hide spinner
+    };
+
+    validateToken();
+  }, [token]); // This effect runs when the app loads or when the token state changes
+
+  // --- Auth Handlers ---
+  
+  const handleLogin = async (email, password) => {
+    try {
+      // FastAPI's OAuth2 expects form data, not JSON
+      const formData = new URLSearchParams();
+      formData.append('username', email); // It expects 'username', but we're sending email
+      formData.append('password', password);
+
+      const response = await apiClient.post('/token/', formData, {
+         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      });
+
+      const newAuthToken = response.data.access_token;
+      localStorage.setItem('token', newAuthToken);
+      setToken(newAuthToken); // This will trigger the useEffect to fetch user and change page
+
+    } catch (error) {
+      console.error("Login failed:", error);
+      // Return the error message to display in the form
+      return error.response?.data?.detail || "An unknown error occurred.";
+    }
+  };
+
+  const handleRegister = async (username, email, password) => {
+    try {
+      await apiClient.post('/register/', {
+        username,
+        email,
+        password,
+      });
+      // After successful registration, send them to the login page
+      setPage('login');
+      return null; // No error
+
+    } catch (error) {
+      console.error("Registration failed:", error);
+      return error.response?.data?.detail || "An unknown error occurred.";
+    }
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('token');
+    setToken(null);
+    setCurrentUser(null);
+    setPage('login'); // Go to login page
+  };
+  
+  // --- Render Logic ---
+
+  if (authLoading) {
+    return <FullPageSpinner />;
+  }
+
+  if (page === 'login') {
+    return <LoginPage onLogin={handleLogin} onGoToRegister={() => setPage('register')} />;
+  }
+
+  if (page === 'register') {
+    return <RegisterPage onRegister={handleRegister} onGoToLogin={() => setPage('login')} />;
+  }
+
+  if (page === 'app' && currentUser) {
+    // We are logged in, show the main MovieApp
+    return <MovieApp user={currentUser} onLogout={handleLogout} />;
+  }
+
+  // Fallback (shouldn't really be reached)
+  return <LoginPage onLogin={handleLogin} onGoToRegister={() => setPage('register')} />;
+}
+
+// ==================================================================
+// --- MAIN MOVIE APPLICATION (Protected) ---
+// This is our old "App" component, now renamed to "MovieApp"
+// ==================================================================
+
+function MovieApp({ user, onLogout }) {
   const [recommendations, setRecommendations] = useState([]);
-  const [userRatings, setUserRatings] = useState({}); // Stores ratings as { movie_id: score }
+  const [userRatings, setUserRatings] = useState({});
   const [selectedMovie, setSelectedMovie] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState("");
-
-  // --- Data Fetching Hooks ---
 
   // Fetch initial data (recommendations and user ratings) on page load
   useEffect(() => {
@@ -24,12 +155,12 @@ export default function App() {
         setIsLoading(true);
         setErrorMessage("");
         
-        // Fetch recommendations
-        const recsResponse = await axios.get(`${API_URL}/recommendations/${USER_ID}`);
+        // Use apiClient - it sends the token automatically!
+        const recsResponse = await apiClient.get('/recommendations/');
         setRecommendations(recsResponse.data);
         
-        // Fetch user's past ratings
-        const ratingsResponse = await axios.get(`${API_URL}/users/${USER_ID}/ratings`);
+        // Use the new /users/me/ratings endpoint
+        const ratingsResponse = await apiClient.get('/users/me/ratings');
         // Convert array of {movie_id, score} to a fast-lookup map {movie_id: score}
         const ratingsMap = ratingsResponse.data.reduce((acc, rating) => {
           acc[rating.movie_id] = rating.score;
@@ -39,14 +170,19 @@ export default function App() {
 
       } catch (err) {
         console.error("Error fetching initial data:", err);
-        setErrorMessage("Could not fetch data. Is the backend server running?");
+        if (err.response && err.response.status === 401) {
+          // Token is bad, force logout
+          onLogout();
+        } else {
+          setErrorMessage("Could not fetch data. Is the backend server running?");
+        }
       } finally {
         setIsLoading(false);
       }
     };
     
     fetchInitialData();
-  }, []);
+  }, [onLogout]); // Add onLogout to dependency array
 
   // Fetch search results when searchQuery changes
   useEffect(() => {
@@ -58,7 +194,8 @@ export default function App() {
     const fetchSearch = async () => {
       try {
         setErrorMessage("");
-        const response = await axios.get(`${API_URL}/movies/`, {
+        // Use apiClient for public endpoint
+        const response = await apiClient.get('/movies/', {
           params: { search: searchQuery, limit: 10 }
         });
         setSearchResults(response.data);
@@ -76,21 +213,22 @@ export default function App() {
     return () => clearTimeout(delayDebounceFn);
   }, [searchQuery]);
 
+
   // --- API Functions ---
 
   const handleRating = async (rating) => {
-    setErrorMessage(""); // Clear old errors
+    setErrorMessage(""); 
     if (!selectedMovie) return;
 
+    // We no longer need user_id, the token handles it!
     const newRating = {
       movie_id: selectedMovie.id,
-      user_id: USER_ID,
       score: rating,
     };
 
     try {
-      const response = await axios.post(`${API_URL}/ratings/`, newRating);
-      console.log("Rating submitted:", response.data);
+      // Use apiClient
+      const response = await apiClient.post('/ratings/', newRating);
       
       // --- Update local state immediately ---
       setUserRatings(prevRatings => ({
@@ -108,19 +246,22 @@ export default function App() {
 
     } catch (err) {
       console.error("Error submitting rating:", err);
-      setErrorMessage("Could not submit rating.");
+      if (err.response && err.response.status === 401) {
+        onLogout();
+      } else {
+        setErrorMessage("Could not submit rating.");
+      }
     }
   };
   
   const fetchRecommendations = async () => {
     try {
-      // Don't set loading for a refresh
       setErrorMessage("");
-      const response = await axios.get(`${API_URL}/recommendations/${USER_ID}`);
+      // Use apiClient
+      const response = await apiClient.get('/recommendations/');
       setRecommendations(response.data);
     } catch (err) {
       console.error("Error fetching recommendations:", err);
-      setErrorMessage("Could not fetch recommendations.");
     }
   };
 
@@ -131,7 +272,12 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-gray-900 text-white font-sans">
-      <Header searchQuery={searchQuery} setSearchQuery={setSearchQuery} />
+      <Header 
+        user={user}
+        onLogout={onLogout}
+        searchQuery={searchQuery} 
+        setSearchQuery={setSearchQuery} 
+      />
 
       <main className="container mx-auto px-4 py-8">
         {errorMessage && <ErrorMessage message={errorMessage} />}
@@ -160,9 +306,189 @@ export default function App() {
   );
 }
 
-// --- Sub-Components ---
+// ==================================================================
+// --- AUTH PAGE COMPONENTS ---
+// ==================================================================
 
-function Header({ searchQuery, setSearchQuery }) {
+function LoginPage({ onLogin, onGoToRegister }) {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setError('');
+    setLoading(true);
+    const apiError = await onLogin(email, password);
+    setLoading(false);
+    if (apiError) {
+      setError(apiError);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-900 text-white flex items-center justify-center p-4">
+      <div className="bg-gray-800 p-8 rounded-lg shadow-2xl w-full max-w-md">
+        <div className="text-3xl font-bold text-yellow-400 flex items-center justify-center mb-6">
+          <LogoIcon />
+          MovieRec
+        </div>
+        <h2 className="text-2xl font-bold text-center text-white mb-6">Login to your account</h2>
+        
+        {error && <p className="bg-red-800 text-red-100 p-3 rounded-lg mb-4 text-center">{error}</p>}
+        
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <AuthInput
+            id="email"
+            label="Email"
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            autoComplete="email"
+          />
+          <AuthInput
+            id="password"
+            label="Password"
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            autoComplete="current-password"
+          />
+          <button
+            type="submit"
+            disabled={loading}
+            className="w-full bg-yellow-400 text-gray-900 font-bold py-3 px-4 rounded-lg hover:bg-yellow-300 transition-colors disabled:opacity-50"
+          >
+            {loading ? 'Logging in...' : 'Login'}
+          </button>
+        </form>
+        <p className="text-center text-gray-400 mt-6">
+          Don't have an account?{' '}
+          <button onClick={onGoToRegister} className="text-yellow-400 font-semibold hover:underline">
+            Register here
+          </button>
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function RegisterPage({ onRegister, onGoToLogin }) {
+  const [username, setUsername] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (password.length < 4) {
+      setError("Password must be at least 4 characters long.");
+      return;
+    }
+    setError('');
+    setLoading(true);
+    const apiError = await onRegister(username, email, password);
+    setLoading(false);
+    if (apiError) {
+      setError(apiError);
+    } else {
+      // If registration is successful (no error), show an alert
+      // and then go to login
+      alert("Registration successful! Please log in.");
+      onGoToLogin();
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-900 text-white flex items-center justify-center p-4">
+      <div className="bg-gray-800 p-8 rounded-lg shadow-2xl w-full max-w-md">
+        <h2 className="text-3xl font-bold text-center text-yellow-400 mb-6">Create Your Account</h2>
+        
+        {error && <p className="bg-red-800 text-red-100 p-3 rounded-lg mb-4 text-center">{error}</p>}
+        
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <AuthInput
+            id="username"
+            label="Username"
+            type="text"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            autoComplete="username"
+          />
+          <AuthInput
+            id="email"
+            label="Email"
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            autoComplete="email"
+          />
+          <AuthInput
+            id="password"
+            label="Password (min. 4 chars)"
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            autoComplete="new-password"
+          />
+          <button
+            type="submit"
+            disabled={loading}
+            className="w-full bg-yellow-400 text-gray-900 font-bold py-3 px-4 rounded-lg hover:bg-yellow-300 transition-colors disabled:opacity-50"
+          >
+            {loading ? 'Registering...' : 'Create Account'}
+          </button>
+        </form>
+        <p className="text-center text-gray-400 mt-6">
+          Already have an account?{' '}
+          <button onClick={onGoToLogin} className="text-yellow-400 font-semibold hover:underline">
+            Login here
+          </button>
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// Re-usable input component for auth forms
+function AuthInput({ id, label, type, value, onChange, autoComplete }) {
+  return (
+    <div>
+      <label htmlFor={id} className="block text-sm font-medium text-gray-300 mb-1">
+        {label}
+      </label>
+      <input
+        id={id}
+        name={id}
+        type={type}
+        required
+        value={value}
+        onChange={onChange}
+        autoComplete={autoComplete}
+        className="w-full bg-gray-700 text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-400 border border-gray-600"
+      />
+    </div>
+  );
+}
+
+function FullPageSpinner() {
+  return (
+    <div className="min-h-screen bg-gray-900 text-white flex items-center justify-center">
+      <LoadingSpinner />
+    </div>
+  );
+}
+
+
+// ==================================================================
+// --- ORIGINAL APP COMPONENTS (Updated Header) ---
+// (These are all the same as the last version, just included for
+// a complete single-file copy/paste)
+// ==================================================================
+
+function Header({ user, onLogout, searchQuery, setSearchQuery }) {
   return (
     <header className="bg-gray-800 shadow-lg sticky top-0 z-50">
       <nav className="container mx-auto px-4 py-4 flex justify-between items-center">
@@ -170,17 +496,28 @@ function Header({ searchQuery, setSearchQuery }) {
           <LogoIcon />
           MovieRec
         </div>
-        <div className="w-full max-w-xs">
-          <div className="relative">
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search for movies..."
-              className="w-full bg-gray-700 text-white px-4 py-2 rounded-full focus:outline-none focus:ring-2 focus:ring-yellow-400"
-            />
-            <SearchIcon />
+        <div className="flex items-center space-x-4">
+          <div className="w-full max-w-xs">
+            <div className="relative">
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search for movies..."
+                className="w-full bg-gray-700 text-white px-4 py-2 rounded-full focus:outline-none focus:ring-2 focus:ring-yellow-400"
+              />
+              <SearchIcon />
+            </div>
           </div>
+          <div className="text-gray-300">|</div>
+          {/* Show user's name and logout button */}
+          <span className="text-gray-300 hidden sm:block">Welcome, {user.username}!</span>
+          <button
+            onClick={onLogout}
+            className="bg-yellow-400 text-gray-900 font-semibold py-2 px-4 rounded-lg text-sm hover:bg-yellow-300 transition-colors"
+          >
+            Logout
+          </button>
         </div>
       </nav>
     </header>
@@ -200,7 +537,6 @@ function MovieList({ movies, onMovieSelect }) {
   );
 }
 
-// --- UPDATED MOVIE CARD ---
 function MovieCard({ movie, onMovieSelect }) {
   const mainGenre = movie.genres ? movie.genres.split('|')[0] : 'Movie';
 
@@ -215,15 +551,17 @@ function MovieCard({ movie, onMovieSelect }) {
             src={movie.poster_url} 
             alt={movie.title} 
             className="w-full h-full object-cover transition-opacity duration-300 group-hover:opacity-75"
-            // Handle image load errors
-            onError={(e) => { e.target.style.display = 'none'; }}
+            onError={(e) => { 
+              // If poster fails to load, hide the img tag to show the fallback
+              e.target.style.display = 'none'; 
+              e.target.parentElement.querySelector('div').style.display = 'flex';
+            }}
           />
-        ) : (
-          // Fallback if no poster URL
-          <div className="w-full h-full flex items-center justify-center p-4">
-            <span className="text-lg font-bold text-center text-yellow-400">{movie.title}</span>
-          </div>
-        )}
+        ) : null}
+        {/* Fallback if no poster URL or if image fails to load */}
+        <div style={{ display: movie.poster_url ? 'none' : 'flex' }} className="w-full h-full items-center justify-center p-4">
+          <span className="text-lg font-bold text-center text-yellow-400">{movie.title}</span>
+        </div>
       </div>
       <div className="p-4">
         <h3 className="font-bold text-lg truncate" title={movie.title}>{movie.title}</h3>
@@ -236,6 +574,9 @@ function MovieCard({ movie, onMovieSelect }) {
 function MovieModal({ movie, onClose, onRate, existingRating }) {
   return (
     <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4 overflow-y-auto">
+      {/* Click outside to close */}
+      <div className="absolute inset-0 z-[-1]" onClick={onClose}></div>
+
       <div 
         className="bg-gray-800 rounded-lg shadow-2xl w-full max-w-lg relative my-8"
         onClick={(e) => e.stopPropagation()}
@@ -247,7 +588,6 @@ function MovieModal({ movie, onClose, onRate, existingRating }) {
           &times;
         </button>
         
-        {/* Poster inside the modal */}
         <div className="w-full h-48 bg-gray-700 rounded-t-lg overflow-hidden relative">
           {movie.poster_url && (
             <img 
@@ -272,8 +612,6 @@ function MovieModal({ movie, onClose, onRate, existingRating }) {
           </div>
         </div>
       </div>
-      {/* Click outside to close */}
-      <div className="absolute inset-0 z-[-1]" onClick={onClose}></div>
     </div>
   );
 }
@@ -287,6 +625,8 @@ function StarRating({ initialRating = 0, onSetRating }) {
     onSetRating(rate);
   };
   
+  // When the modal opens, the initialRating prop might change.
+  // This useEffect ensures the stars update if the prop changes.
   useEffect(() => {
     setRating(initialRating);
   }, [initialRating]);
@@ -296,7 +636,8 @@ function StarRating({ initialRating = 0, onSetRating }) {
       {[1, 2, 3, 4, 5].map((star) => (
         <button
           key={star}
-          className="bg-transparent border-none"
+          type="button" // Add type="button" to prevent form submission if it's in a form
+          className="bg-transparent border-none p-0 cursor-pointer"
           onClick={() => handleRate(star)}
           onMouseEnter={() => setHoverRating(star)}
           onMouseLeave={() => setHoverRating(0)}
