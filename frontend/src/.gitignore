@@ -1,0 +1,39 @@
+# --- Python / Backend ---
+
+# Virtual Environment
+# This assumes your venv is in the root as 'venv'.
+# If it's inside 'backend', change to '/backend/venv/'
+/venv/
+
+# Database file
+*.db
+*.sqlite3
+
+# Python cache
+__pycache__/
+*.pyc
+
+# --- Node / Frontend ---
+
+# Node modules
+/frontend/node_modules/
+
+# Vite build/dist folder
+/frontend/dist/
+
+# NPM logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# --- OS / Editor ---
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
