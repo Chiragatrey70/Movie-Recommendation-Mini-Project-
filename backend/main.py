@@ -1,18 +1,23 @@
 import uvicorn
-from fastapi import FastAPI, Depends, HTTPException, Query
+from fastapi import FastAPI, Depends, HTTPException, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import List, Optional
+import os
 
-# --- New Imports ---
-# (Dots removed from these imports)
+# Import all our custom modules
 import ml_engine
-import models  # Import from models.py
-from database import SessionLocal, engine, get_db, Base  # Import from database.py
+import models
+import database
+
+# Get the database setup components
+Base = database.Base
+engine = database.engine
+get_db = database.get_db
 
 # --- Pydantic Schemas (API Validation) ---
-# These stay the same
+
 class RatingBase(BaseModel):
     movie_id: int
     score: float
@@ -23,112 +28,122 @@ class RatingCreate(RatingBase):
 class RatingResponse(RatingBase):
     id: int
     user_id: int
+    
     class Config:
         from_attributes = True
 
+# A simpler response for the user ratings list
+class UserRatingResponse(BaseModel):
+    movie_id: int
+    score: float
+
+    class Config:
+        from_attributes = True
+
+# For Movie
 class MovieBase(BaseModel):
     title: str
-    description: str
-    release_year: int
-    genres: str
+    description: Optional[str] = None
+    release_year: Optional[int] = None
+    genres: Optional[str] = None
 
 class MovieResponse(MovieBase):
     id: int
-    ratings: List[RatingResponse] = []
+    # We'll remove ratings from this to keep it fast
+    # ratings: List[RatingResponse] = [] 
+    
     class Config:
         from_attributes = True
 
+# For User
 class UserBase(BaseModel):
-    username: str
-    email: str
+    username: Optional[str] = None
+    email: Optional[str] = None
 
 class UserCreate(UserBase):
-    password: str
+    id: Optional[int] = None # Allow specifying ID for our new logic
+    password: str = "default" # Add default for simplicity
 
 class UserResponse(UserBase):
     id: int
-    ratings: List[RatingResponse] = []
+    # We'll remove ratings from this to keep it fast
+    # ratings: List[RatingResponse] = []
+    
     class Config:
         from_attributes = True
 
 # --- FastAPI App ---
+
 app = FastAPI(
     title="Movie Recommendation API",
-    description="Day 2: ML Engine Integrated (Refactored).",
-    version="2.1.0"
+    description="Full-stack API with real data and background model training.",
+    version="4.0.0" # Final version!
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"], # Allows all origins (for development)
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["*"], # Allows all methods
+    allow_headers=["*"], # Allows all headers
 )
-
-# --- Mock Data Seeding ---
-def populate_database(db: Session):
-    if db.query(models.Movie).count() == 0:
-        mock_movies = [
-            models.Movie(title="Inception", description="A thief who steals corporate secrets through use of dream-sharing technology...", release_year=2010, genres="Sci-Fi,Thriller,Action"),
-            models.Movie(title="The Shawshank Redemption", description="Two imprisoned men bond over a number of years, finding solace...", release_year=1994, genres="Drama"),
-            models.Movie(title="The Dark Knight", description="When the menace known as the Joker emerges...", release_year=2008, genres="Action,Crime,Drama"),
-            models.Movie(title="Pulp Fiction", description="The lives of two mob hitmen, a boxer, a gangster's wife...", release_year=1994, genres="Crime,Drama"),
-            models.Movie(title="Forrest Gump", description="The presidencies of Kennedy and Johnson, the Vietnam War...", release_year=1994, genres="Drama,Romance"),
-            models.Movie(title="The Matrix", description="A computer hacker learns from mysterious rebels about the true nature of his reality...", release_year=1999, genres="Action,Sci-Fi"),
-            models.Movie(title="Goodfellas", description="The story of Henry Hill and his life in the mob...", release_year=1990, genres="Biography,Crime,Drama"),
-            models.Movie(title="Interstellar", description="A team of explorers travel through a wormhole in space...", release_year=2014, genres="Adventure,Drama,Sci-Fi"),
-            models.Movie(title="Parasite", description="Greed and class discrimination threaten the newly formed symbiotic relationship...", release_year=2019, genres="Comedy,Drama,Thriller"),
-            models.Movie(title="Spirited Away", description="During her family's move to the suburbs, a 10-year-old girl wanders into a world...", release_year=2001, genres="Animation,Adventure,Family"),
-            models.Movie(title="The Grand Budapest Hotel", description="The adventures of Gustave H, a legendary concierge...", release_year=2014, genres="Adventure,Comedy,Crime"),
-            models.Movie(title="Mad Max: Fury Road", description="In a post-apocalyptic wasteland, a woman rebels...", release_year=2015, genres="Action,Adventure,Sci-Fi"),
-            models.Movie(title="Blade Runner 2049", description="Young Blade Runner K's discovery of a long-buried secret...", release_year=2017, genres="Action,Drama,Mystery"),
-            models.Movie(title="Dune", description="Feature adaptation of Frank Herbert's science fiction novel...", release_year=2021, genres="Action,Adventure,Drama"),
-            models.Movie(title="Oppenheimer", description="The story of American scientist J. Robert Oppenheimer...", release_year=2023, genres="Biography,Drama,History")
-        ]
-        db.add_all(mock_movies)
-        
-        mock_user = models.User(username="testuser", email="test@example.com", hashed_password="notarealhash")
-        db.add(mock_user)
-        db.commit() # Commit user first to get ID=1
-
-        mock_ratings = [
-            models.Rating(user_id=1, movie_id=1, score=5.0), # Likes Inception
-            models.Rating(user_id=1, movie_id=3, score=5.0), # Likes Dark Knight
-            models.Rating(user_id=1, movie_id=6, score=4.5), # Likes The Matrix
-            models.Rating(user_id=1, movie_id=14, score=4.0), # Likes Dune
-        ]
-        db.add_all(mock_ratings)
-        db.commit()
-        print("Database populated with mock data.")
-    else:
-        print("Database already populated.")
 
 # --- Startup Event ---
 @app.on_event("startup")
 def on_startup():
-    models.Base.metadata.create_all(bind=engine)
+    # Create all database tables
+    Base.metadata.create_all(bind=engine)
     
-    db = SessionLocal()
+    db = next(get_db())
     try:
-        populate_database(db)
+        # Check if the database is populated
+        movie_count = db.query(models.Movie).count()
+        if movie_count == 0:
+            print("--------------------------------------------------")
+            print("WARNING: Database is empty.")
+            print("Run the seeder script to populate the database:")
+            print("python backend/seed.py")
+            print("--------------------------------------------------")
+        else:
+            print(f"Database already populated with {movie_count} movies.")
+        
+        # --- Train the ML model on startup ---
+        print("Training collaborative filtering model...")
         ml_engine.train_collaborative_model(db)
+
     except Exception as e:
-        print(f"Error on startup: {e}")
+        print(f"Error during startup: {e}")
     finally:
         db.close()
 
 # --- API Endpoints ---
+
 @app.get("/", summary="Root")
 def read_root():
-    return {"message": "Welcome to the Movie Recommendation API (Day 2)"}
+    return {"message": "Welcome to the Movie Recommendation API (v4.0)"}
 
 @app.post("/users/", response_model=UserResponse, summary="Create User")
 def create_user(user: UserCreate, db: Session = Depends(get_db)):
-    db_user = db.query(models.User).filter(models.User.email == user.email).first()
-    if db_user:
-        raise HTTPException(status_code=400, detail="Email already registered")
-    new_user = models.User(username=user.username, email=user.email, hashed_password=user.password)
+    """
+    Creates a new user. Since we're not auto-incrementing, we find the
+    next available ID.
+    """
+    if user.id:
+         db_user = db.query(models.User).filter(models.User.id == user.id).first()
+         if db_user:
+             raise HTTPException(status_code=400, detail="User ID already exists")
+    else:
+        # Find max ID and add 1
+        max_id = db.query(models.User.id).order_by(models.User.id.desc()).first()
+        new_id = (max_id[0] if max_id else 0) + 1
+        user.id = new_id
+    
+    new_user = models.User(
+        id=user.id, 
+        username=user.username or f"user{user.id}", 
+        email=user.email, 
+        hashed_password=f"hashed_{user.password}"
+    )
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
@@ -143,7 +158,7 @@ def get_movies(
 ):
     query = db.query(models.Movie)
     if search:
-        query = query.filter(models.Movie.title.contains(search))
+        query = query.filter(models.Movie.title.ilike(f"%{search}%"))
     movies = query.offset(skip).limit(limit).all()
     return movies
 
@@ -151,11 +166,19 @@ def get_movies(
 def get_movie_by_id(movie_id: int, db: Session = Depends(get_db)):
     movie = db.query(models.Movie).filter(models.Movie.id == movie_id).first()
     if not movie:
-        raise HTTPException(status_code=404, detail="Movie not found")
+        raise HTTPException(status_code=4404, detail="Movie not found")
     return movie
 
 @app.post("/ratings/", response_model=RatingResponse, summary="Rate a Movie")
-def create_or_update_rating(rating: RatingCreate, db: Session = Depends(get_db)):
+def create_or_update_rating(
+    rating: RatingCreate, 
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
+    """
+    Create a new rating or update an existing one.
+    Triggers model retraining in the background.
+    """
     user = db.query(models.User).filter(models.User.id == rating.user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -169,24 +192,26 @@ def create_or_update_rating(rating: RatingCreate, db: Session = Depends(get_db))
     ).first()
 
     if db_rating:
+        print(f"Updating rating for user {rating.user_id} on movie {rating.movie_id}")
         db_rating.score = rating.score
     else:
+        print(f"Creating new rating for user {rating.user_id} on movie {rating.movie_id}")
         db_rating = models.Rating(**rating.dict())
         db.add(db_rating)
     
     db.commit()
     db.refresh(db_rating)
     
-    print("New rating added. Retraining model...")
-    try:
-        ml_engine.train_collaborative_model(db)
-    except Exception as e:
-        print(f"Error retraining model: {e}")
+    print("Rating submitted. Queuing model retrain in background.")
+    background_tasks.add_task(ml_engine.train_collaborative_model, db)
 
     return db_rating
 
 @app.get("/recommendations/{user_id}", response_model=List[MovieResponse], summary="Get Hybrid Recommendations")
 def get_recommendations(user_id: int, db: Session = Depends(get_db)):
+    """
+    Get hybrid recommendations for a user.
+    """
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -194,11 +219,12 @@ def get_recommendations(user_id: int, db: Session = Depends(get_db)):
     recommended_movie_ids = ml_engine.get_hybrid_recommendations(user_id, db, num_recs=10)
     
     if not recommended_movie_ids:
-        print("ML engine returned no recs. Falling back to simple list.")
-        rated_movie_ids = {r.movie_id for r in user.ratings}
-        all_movies = db.query(models.Movie).all()
-        recommendations = [movie for movie in all_movies if movie.id not in rated_movie_ids]
-        return recommendations[:10]
+        print(f"ML engine returned no recs for user {user_id}. Falling back to simple list.")
+        rated_movie_ids_query = db.query(models.Rating.movie_id).filter(models.Rating.user_id == user_id)
+        rated_movie_ids = {r[0] for r in rated_movie_ids_query.all()}
+        
+        all_movies = db.query(models.Movie).filter(models.Movie.id.notin_(rated_movie_ids)).limit(10).all()
+        return all_movies
 
     recommended_movies = db.query(models.Movie).filter(models.Movie.id.in_(recommended_movie_ids)).all()
     
@@ -207,9 +233,22 @@ def get_recommendations(user_id: int, db: Session = Depends(get_db)):
     
     return ordered_recs
 
+# --- THIS IS THE NEW ENDPOINT ---
+@app.get("/users/{user_id}/ratings", response_model=List[UserRatingResponse], summary="Get All Ratings for a User")
+def get_user_ratings(user_id: int, db: Session = Depends(get_db)):
+    """
+    Gets all movie ratings for a specific user.
+    """
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+        
+    ratings = db.query(models.Rating).filter(models.Rating.user_id == user_id).all()
+    return ratings
+
 # --- Run the App ---
 if __name__ == "__main__":
-    print("--- Starting FastAPI Server (Day 2 - Refactored) ---")
+    print("--- Starting FastAPI Server (v4.0 - User Ratings) ---")
     print("Access the API docs at http://127.0.0.1:8000/docs")
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
 

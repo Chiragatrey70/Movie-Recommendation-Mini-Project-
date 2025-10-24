@@ -1,324 +1,348 @@
-import { useState, useEffect } from 'react'
-import axios from 'axios'
-import { Search, X, Star, Film, ThumbsUp } from 'lucide-react'
+import { useState, useEffect } from 'react';
+import axios from 'axios';
 
-// Define the backend API URL
-const API_URL = "http://127.0.0.1:8000"
+// --- Constants ---
+const API_URL = "http://127.0.0.1:8000";
+const USER_ID = 1; // We'll hardcode user 1 for now
 
 // --- Main App Component ---
 export default function App() {
-  const [movies, setMovies] = useState([])
-  const [recommendations, setRecommendations] = useState([])
-  const [searchTerm, setSearchTerm] = useState("")
-  const [selectedMovie, setSelectedMovie] = useState(null)
-  const [isLoading, setIsLoading] = useState(true)
-  const [error, setError] = useState(null)
-  
-  // Our "test user". In a real app, this would come from login.
-  const USER_ID = 1 
+  const [recommendations, setRecommendations] = useState([]);
+  const [userRatings, setUserRatings] = useState({}); // Stores ratings as { movie_id: score }
+  const [selectedMovie, setSelectedMovie] = useState(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [errorMessage, setErrorMessage] = useState("");
 
-  // Fetch initial data (all movies and recommendations) on load
+  // --- Data Fetching Hooks ---
+
+  // Fetch initial data (recommendations and user ratings) on page load
   useEffect(() => {
     const fetchInitialData = async () => {
-      setIsLoading(true)
-      setError(null)
       try {
-        // Fetch all movies
-        const moviesResponse = await axios.get(`${API_URL}/movies/`)
-        setMovies(moviesResponse.data)
+        setIsLoading(true);
+        setErrorMessage("");
         
-        // Fetch recommendations for our test user
-        const recsResponse = await axios.get(`${API_URL}/recommendations/${USER_ID}`)
-        setRecommendations(recsResponse.data)
+        // Fetch recommendations
+        const recsResponse = await axios.get(`${API_URL}/recommendations/${USER_ID}`);
+        setRecommendations(recsResponse.data);
         
+        // Fetch user's past ratings
+        const ratingsResponse = await axios.get(`${API_URL}/users/${USER_ID}/ratings`);
+        // Convert array of {movie_id, score} to a fast-lookup map {movie_id: score}
+        const ratingsMap = ratingsResponse.data.reduce((acc, rating) => {
+          acc[rating.movie_id] = rating.score;
+          return acc;
+        }, {});
+        setUserRatings(ratingsMap);
+
       } catch (err) {
-        console.error("Error fetching data:", err)
-        setError("Could not connect to the movie server. Is it running?")
+        console.error("Error fetching initial data:", err);
+        setErrorMessage("Could not fetch data. Is the backend server running?");
+      } finally {
+        setIsLoading(false);
       }
-      setIsLoading(false)
-    }
+    };
     
-    fetchInitialData()
-  }, [])
+    fetchInitialData();
+  }, []);
 
-  // Handle search logic
-  const handleSearch = async (e) => {
-    e.preventDefault()
-    if (!searchTerm) {
-      // If search is cleared, fetch all movies again
-      const moviesResponse = await axios.get(`${API_URL}/movies/`)
-      setMovies(moviesResponse.data)
-      return
+  // Fetch search results when searchQuery changes
+  useEffect(() => {
+    if (searchQuery.trim() === "") {
+      setSearchResults([]);
+      return;
     }
-    
+
+    const fetchSearch = async () => {
+      try {
+        setErrorMessage("");
+        const response = await axios.get(`${API_URL}/movies/`, {
+          params: { search: searchQuery, limit: 10 }
+        });
+        setSearchResults(response.data);
+      } catch (err) {
+        console.error("Error searching movies:", err);
+        setErrorMessage("Could not fetch search results.");
+      }
+    };
+
+    // Debounce search
+    const delayDebounceFn = setTimeout(() => {
+      fetchSearch();
+    }, 300);
+
+    return () => clearTimeout(delayDebounceFn);
+  }, [searchQuery]);
+
+  // --- API Functions ---
+
+  const handleRating = async (rating) => {
+    setErrorMessage(""); // Clear old errors
+    if (!selectedMovie) return;
+
+    const newRating = {
+      movie_id: selectedMovie.id,
+      user_id: USER_ID,
+      score: rating,
+    };
+
     try {
-      // Fetch movies matching the search term
-      const response = await axios.get(`${API_URL}/movies/`, {
-        params: { search: searchTerm }
-      })
-      setMovies(response.data)
-    } catch (err) {
-      console.error("Error searching movies:", err)
-      setError("Error searching for movies.")
-    }
-  }
+      const response = await axios.post(`${API_URL}/ratings/`, newRating);
+      console.log("Rating submitted:", response.data);
+      
+      // --- Update local state immediately ---
+      setUserRatings(prevRatings => ({
+        ...prevRatings,
+        [selectedMovie.id]: rating,
+      }));
+      
+      // Close modal and refresh recommendations after rating
+      setSelectedMovie(null);
+      
+      // Give the background task a moment to start, then refetch
+      setTimeout(() => {
+        fetchRecommendations(); 
+      }, 1000); // 1 second delay
 
-  // Handle rating a movie
-  const handleRateMovie = async (movieId, score) => {
+    } catch (err) {
+      console.error("Error submitting rating:", err);
+      setErrorMessage("Could not submit rating.");
+    }
+  };
+  
+  const fetchRecommendations = async () => {
     try {
-      await axios.post(`${API_URL}/ratings/`, {
-        user_id: USER_ID,
-        movie_id: movieId,
-        score: score
-      })
-      
-      // After rating, refresh recommendations
-      const recsResponse = await axios.get(`${API_URL}/recommendations/${USER_ID}`)
-      setRecommendations(recsResponse.data)
-      
-      // Close modal and show alert
-      setSelectedMovie(null) // Close the modal on successful rating
-      alert(`You rated this movie ${score} stars! Recommendations updated.`)
-
+      // Don't set loading for a refresh
+      setErrorMessage("");
+      const response = await axios.get(`${API_URL}/recommendations/${USER_ID}`);
+      setRecommendations(response.data);
     } catch (err) {
-      console.error("Error rating movie:", err)
-      setError("Could not submit rating.")
+      console.error("Error fetching recommendations:", err);
+      setErrorMessage("Could not fetch recommendations.");
     }
-  }
+  };
+
+  // --- Render Logic ---
+
+  const moviesToShow = searchQuery.trim() ? searchResults : recommendations;
+  const title = searchQuery.trim() ? "Search Results" : "Recommended For You";
 
   return (
     <div className="min-h-screen bg-gray-900 text-white font-sans">
-      {/* --- Header & Search Bar --- */}
-      <header className="bg-gray-800 shadow-lg p-4 sticky top-0 z-10">
-        <div className="container mx-auto max-w-6xl flex justify-between items-center">
-          <div className="flex items-center space-x-2">
-            <Film className="text-yellow-400" size={32} />
-            <h1 className="text-2xl font-bold text-white">MovieRec</h1>
-          </div>
-          <form onSubmit={handleSearch} className="flex-1 max-w-md">
-            <div className="relative">
-              <input
-                type="text"
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                placeholder="Search for movies..."
-                className="w-full bg-gray-700 text-white rounded-full py-2 px-4 focus:outline-none focus:ring-2 focus:ring-yellow-400"
-              />
-              <button type="submit" className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-yellow-400">
-                <Search size={20} />
-              </button>
-            </div>
-          </form>
-        </div>
-      </header>
+      <Header searchQuery={searchQuery} setSearchQuery={setSearchQuery} />
 
-      {/* --- Main Content --- */}
-      <main className="container mx-auto max-w-6xl p-4 mt-8">
-        {isLoading && <LoadingSpinner />}
-        {error && <ErrorMessage message={error} />}
+      <main className="container mx-auto px-4 py-8">
+        {errorMessage && <ErrorMessage message={errorMessage} />}
         
-        {!isLoading && !error && (
-          <>
-            {/* --- BUG FIX #1: SEARCH RESULTS ---
-              We only show the "Recommended" section if there is NO active search term.
-              This pushes the "Search Results" section to the top.
-            */}
-            {!searchTerm && (
-              <MovieSection 
-                title="Recommended For You" 
-                icon={<ThumbsUp className="text-yellow-400" />}
-                movies={recommendations} 
-                onMovieClick={setSelectedMovie} 
-              />
-            )}
-            
-            {/* --- Browse All Movies / Search Results Section --- */}
-            <MovieSection 
-              title={searchTerm ? "Search Results" : "Browse All Movies"}
-              icon={<Film className="text-yellow-400" />}
-              movies={movies} 
-              onMovieClick={setSelectedMovie} 
-            />
-          </>
+        <h2 className="text-3xl font-bold mb-6 flex items-center">
+          <StarIcon /> {title}
+        </h2>
+
+        {isLoading ? (
+          <LoadingSpinner />
+        ) : (
+          <MovieList movies={moviesToShow} onMovieSelect={setSelectedMovie} />
         )}
       </main>
 
-      {/* --- Movie Details Modal --- */}
       {selectedMovie && (
-        <MovieModal 
-          movie={selectedMovie} 
-          onClose={() => setSelectedMovie(null)} 
-          onRate={handleRateMovie}
+        <MovieModal
+          movie={selectedMovie}
+          onClose={() => setSelectedMovie(null)}
+          onRate={handleRating}
+          // Pass the existing rating into the modal
+          existingRating={userRatings[selectedMovie.id] || 0}
         />
       )}
     </div>
-  )
+  );
 }
 
-// --- Child Components ---
+// --- Sub-Components ---
 
-/**
- * A reusable component to display a horizontal list of movies
- */
-function MovieSection({ title, icon, movies, onMovieClick }) {
+function Header({ searchQuery, setSearchQuery }) {
+  return (
+    <header className="bg-gray-800 shadow-lg sticky top-0 z-50">
+      <nav className="container mx-auto px-4 py-4 flex justify-between items-center">
+        <div className="text-2xl font-bold text-yellow-400 flex items-center">
+          <LogoIcon />
+          MovieRec
+        </div>
+        <div className="w-full max-w-xs">
+          <div className="relative">
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search for movies..."
+              className="w-full bg-gray-700 text-white px-4 py-2 rounded-full focus:outline-none focus:ring-2 focus:ring-yellow-400"
+            />
+            <SearchIcon />
+          </div>
+        </div>
+      </nav>
+    </header>
+  );
+}
+
+function MovieList({ movies, onMovieSelect }) {
   if (movies.length === 0) {
-    return (
-      <section className="mb-12">
-        <h2 className="text-3xl font-bold mb-6 flex items-center space-x-3">
-          {icon}
-          <span>{title}</span>
-        </h2>
-        <p className="text-gray-400">No movies to display in this section.</p>
-      </section>
-    )
+    return <p className="text-gray-400">No movies found.</p>;
   }
-
   return (
-    <section className="mb-12">
-      <h2 className="text-3xl font-bold mb-6 flex items-center space-x-3">
-        {icon}
-        <span>{title}</span>
-      </h2>
-      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-6">
-        {movies.map(movie => (
-          <MovieCard key={movie.id} movie={movie} onClick={() => onMovieClick(movie)} />
-        ))}
-      </div>
-    </section>
-  )
+    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-6">
+      {movies.map(movie => (
+        <MovieCard key={movie.id} movie={movie} onMovieSelect={onMovieSelect} />
+      ))}
+    </div>
+  );
 }
 
-/**
- * A card for a single movie
- */
-function MovieCard({ movie, onClick }) {
-  // Simple placeholder image logic
-  const placeholderUrl = `https://placehold.co/500x750/1a202c/FFFF00?text=${encodeURIComponent(movie.title)}`
-  
+function MovieCard({ movie, onMovieSelect }) {
+  // Extract just the first genre if it exists
+  const mainGenre = movie.genres ? movie.genres.split('|')[0] : 'Movie';
+
   return (
-    <div 
+    <div
+      onClick={() => onMovieSelect(movie)}
       className="bg-gray-800 rounded-lg shadow-lg overflow-hidden cursor-pointer transform transition-transform duration-300 hover:scale-105 hover:shadow-yellow-400/20"
-      onClick={onClick}
     >
-      <img 
-        src={placeholderUrl} 
-        alt={movie.title} 
-        className="w-full h-auto object-cover" 
-        onError={(e) => e.target.src = 'https://placehold.co/500x750/1a202c/FFFF00?text=Image+Not+Found'}
-      />
+      <div className="h-64 bg-gray-700 flex items-center justify-center overflow-hidden p-4">
+        {/* Simple text fallback for movie 'poster' */}
+        <span className="text-xl font-bold text-center px-2 text-yellow-400">{movie.title}</span>
+      </div>
       <div className="p-4">
         <h3 className="font-bold text-lg truncate" title={movie.title}>{movie.title}</h3>
-        <p className="text-gray-400 text-sm">{movie.release_year}</p>
+        <p className="text-gray-400 text-sm">{movie.release_year ? `${mainGenre} • ${movie.release_year}` : mainGenre}</p>
       </div>
     </div>
-  )
+  );
 }
 
-/**
- * A modal to show movie details and allow rating
- */
-function MovieModal({ movie, onClose, onRate }) {
-  const placeholderUrl = `https://placehold.co/400x600/1a202c/FFFF00?text=${encodeURIComponent(movie.title)}`
-
+function MovieModal({ movie, onClose, onRate, existingRating }) {
   return (
-    <div 
-      className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4"
-      onClick={onClose}
-    >
-      <div 
-        className="bg-gray-800 rounded-lg shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-y-auto flex flex-col md:flex-row"
-        onClick={(e) => e.stopPropagation()} // Prevent modal from closing when clicking inside
+    <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
+      <div className="bg-gray-800 rounded-lg shadow-2xl w-full max-w-lg relative"
+           onClick={(e) => e.stopPropagation()}
       >
-        {/* --- Close Button --- */}
-        <button 
-          onClick={onClose} 
-          className="absolute top-4 right-4 text-gray-400 hover:text-white z-10"
+        <button
+          onClick={onClose}
+          className="absolute top-3 right-3 text-gray-400 hover:text-white text-2xl"
         >
-          <X size={28} />
+          &times;
         </button>
         
-        {/* --- Movie Poster --- */}
-        <img 
-          src={placeholderUrl} 
-          alt={movie.title} 
-          className="w-full md:w-1/3 h-auto object-cover rounded-l-lg"
-          onError={(e) => e.target.src = 'https://placehold.co/400x600/1a202c/FFFF00?text=Image+Not+Found'}
-        />
-        
-        {/* --- Movie Details --- */}
-        <div className="p-8 flex-1">
-          <h2 className="text-4xl font-bold mb-2">{movie.title} ({movie.release_year})</h2>
-          <p className="text-lg text-gray-400 mb-4">{movie.genres.split(',').join(', ')}</p>
-          <p className="text-gray-300 mb-6">{movie.description}</p>
+        <div className="p-8">
+          <h2 className="text-3xl font-bold mb-2 text-yellow-400">{movie.title} ({movie.release_year})</h2>
+          <p className="text-gray-400 mb-4">{movie.genres ? movie.genres.split('|').join(', ') : ''}</p>
+          <p className="text-gray-300 mb-6">{movie.description || "No description available."}</p>
           
-          <div className="border-t border-gray-700 pt-6">
-            <h3 className="text-2xl font-semibold mb-4">Rate this movie</h3>
-            {/* --- BUG FIX #2: STAR RATING ---
-              We pass the onRate function to the improved StarRating component.
-            */}
-            <StarRating onRate={onRate} />
+          <div className="bg-gray-700 p-4 rounded-lg">
+            <h3 className="text-xl font-semibold mb-3">
+              {existingRating > 0 ? "Update your rating" : "Rate this movie"}
+            </h3>
+            {/* Pass the existing rating to the StarRating component */}
+            <StarRating initialRating={existingRating} onSetRating={onRate} />
           </div>
         </div>
       </div>
+      {/* Click outside to close */}
+      <div className="absolute inset-0 z-[-1]" onClick={onClose}></div>
     </div>
-  )
+  );
 }
 
-/**
- * --- BUG FIX #2: STAR RATING (Component Logic) ---
- * This component now uses internal state (`hoverRating`) to track
- * the hover effect, lighting up all stars up to the one you're hovering over.
- */
-function StarRating({ onRate }) {
-  const [hoverRating, setHoverRating] = useState(0); // State for hover
+function StarRating({ initialRating = 0, onSetRating }) {
+  // Set the initial state to the user's existing rating
+  const [rating, setRating] = useState(initialRating);
+  const [hoverRating, setHoverRating] = useState(0);
+
+  const handleRate = (rate) => {
+    setRating(rate);
+    onSetRating(rate);
+  };
+  
+  // This ensures the stars are filled in when the modal opens
+  useEffect(() => {
+    setRating(initialRating);
+  }, [initialRating]);
 
   return (
-    <div 
-      className="flex space-x-2" 
-      onMouseLeave={() => setHoverRating(0)} // Reset hover when mouse leaves the group
-    >
-      {[1, 2, 3, 4, 5].map(starValue => (
-        <button 
-          key={starValue}
-          onClick={() => onRate(starValue)}
-          onMouseEnter={() => setHoverRating(starValue)} // Set hover state
-          className="transition-colors"
-          title={`Rate ${starValue} stars`}
+    <div className="flex items-center space-x-1">
+      {[1, 2, 3, 4, 5].map((star) => (
+        <button
+          key={star}
+          className="bg-transparent border-none"
+          onClick={() => handleRate(star)}
+          onMouseEnter={() => setHoverRating(star)}
+          onMouseLeave={() => setHoverRating(0)}
         >
-          <Star 
-            size={32} 
-            className={
-              starValue <= hoverRating 
-                ? "text-yellow-400 fill-yellow-400" // Lit star (filled)
-                : "text-gray-500"                   // Unlit star (outline)
-            } 
-          />
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            viewBox="0 0 24 24"
+            fill="currentColor"
+            className={`w-10 h-10 transition-colors
+              ${(hoverRating || rating) >= star ? 'text-yellow-400' : 'text-gray-600'}
+            `}
+          >
+            <path
+              fillRule="evenodd"
+              d="M10.788 3.21c.448-1.077 1.976-1.077 2.424 0l2.082 5.007 5.404.433c1.164.093 1.636 1.545.749 2.305l-4.116 3.99.94 5.577c.22 1.303-.959 2.387-2.18 1.758L12 17.314l-4.899 2.99c-1.22.63-2.4-.455-2.18-1.758l.94-5.577-4.116-3.99c-.887-.76-.415-2.212.749-2.305l5.404-.433 2.082-5.007z"
+              clipRule="evenodd"
+            />
+          </svg>
         </button>
       ))}
     </div>
-  )
+  );
 }
 
-/**
- * Loading spinner
- */
+// --- Utility Components ---
+
 function LoadingSpinner() {
   return (
     <div className="flex justify-center items-center h-64">
-      <div className="animate-spin rounded-full h-32 w-32 border-t-4 border-b-4 border-yellow-400"></div>
+      <div className="animate-spin rounded-full h-16 w-16 border-t-2 border-b-2 border-yellow-400"></div>
     </div>
-  )
+  );
 }
 
-/**
- * Error message display
- */
 function ErrorMessage({ message }) {
   return (
-    <div className="bg-red-900 border border-red-700 text-red-100 px-4 py-3 rounded-lg text-center">
+    <div className="bg-red-800 border border-red-700 text-red-100 px-4 py-3 rounded-lg relative mb-6" role="alert">
       <strong className="font-bold">Error: </strong>
       <span className="block sm:inline">{message}</span>
     </div>
-  )
+  );
+}
+
+// --- SVG Icons ---
+
+function LogoIcon() {
+  return (
+    <svg className="w-8 h-8 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 4v16M17 4v16M3 8h4m10 0h4M3 12h18M3 16h4m10 0h4" />
+    </svg>
+  );
+}
+
+function SearchIcon() {
+  return (
+    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400">
+      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+      </svg>
+    </span>
+  );
+}
+
+function StarIcon() {
+  return (
+    <svg className="w-7 h-7 mr-3 text-yellow-400" fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+      <path fillRule="evenodd" d="M10.788 3.21c.448-1.077 1.976-1.077 2.424 0l2.082 5.007 5.404.433c1.164.093 1.636 1.545.749 2.305l-4.116 3.99.94 5.577c.22 1.303-.959 2.387-2.18 1.758L12 17.314l-4.899 2.99c-1.22.63-2.4-.455-2.18-1.758l.94-5.577-4.116-3.99c-.887-.76-.415-2.212.749-2.305l5.404-.433 2.082-5.007z" clipRule="evenodd" />
+    </svg>
+  );
 }
 

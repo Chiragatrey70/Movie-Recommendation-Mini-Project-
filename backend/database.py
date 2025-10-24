@@ -1,23 +1,26 @@
+import os
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-import os
 
-DATABASE_URL = "sqlite:///./movies.db"
-
-# We'll remove this line now, so our DB and ratings persist
-# if os.path.exists("movies.db"):
-#     os.remove("movies.db")
+# --- THIS IS THE NEW FIX ---
+# Get the absolute path to the 'backend' directory
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# Get the absolute path to the parent (root) directory
+ROOT_DIR = os.path.dirname(BASE_DIR)
+# Create the absolute path to our database file in the ROOT folder
+DATABASE_PATH = os.path.join(ROOT_DIR, "movies.db")
+# Define the absolute database URL
+DATABASE_URL = f"sqlite:///{DATABASE_PATH}"
+# --- END OF FIX ---
 
 engine = create_engine(
     DATABASE_URL, connect_args={"check_same_thread": False}
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-# models.py will import this Base
 Base = declarative_base()
 
-# main.py will import this function
+# Dependency to get DB session
 def get_db():
     db = SessionLocal()
     try:
