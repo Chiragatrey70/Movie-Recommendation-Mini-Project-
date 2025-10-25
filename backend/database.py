@@ -5,51 +5,56 @@ from sqlalchemy.ext.declarative import declarative_base
 from dotenv import load_dotenv # Import load_dotenv
 
 # Load environment variables from .env file (optional, good for local dev)
-load_dotenv()
+# Make sure this runs before accessing environment variables
+# Looks for .env in the parent directory relative to this file (database.py)
+dotenv_path = os.path.join(os.path.dirname(__file__), '..', '.env')
+if os.path.exists(dotenv_path):
+    print(f"Loading environment variables from: {dotenv_path}")
+    load_dotenv(dotenv_path=dotenv_path)
+else:
+    print(f".env file not found at {dotenv_path}, relying on system environment variables.")
+
 
 # --- Read Database URL from Environment Variable ---
-# Use os.getenv to read the variable. Provide a default fallback for local dev
-# if the Render variable isn't set.
-# IMPORTANT: Ensure your LOCAL .env file OR database.py still has your LOCAL connection string
-# for local testing. The Render environment variable will override this in deployment.
+# Use os.getenv to read the variable. Render MUST provide this variable in deployment.
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL", # Render will set this automatically from your linked DB
-    "postgresql://postgres:vcaaaa030516@localhost:5432/movierec_db" # Fallback for local
-)
-# ----------------------------------------------------
-
-# Ensure you replace YOUR_LOCAL_USERNAME/PASSWORD in the fallback above
-# if you still want to run locally sometimes.
-
+# Check if DATABASE_URL was successfully loaded
 if DATABASE_URL is None:
-    raise ValueError("DATABASE_URL environment variable is not set and no fallback provided.")
+     # Raise an error if the essential DATABASE_URL is missing.
+     raise ValueError("DATABASE_URL environment variable is not set. Ensure it is set in your environment (e.g., .env file or Render service config). Cannot connect to the database.")
 
-# Modify the engine creation slightly if the Render DB URL uses postgres:// instead of postgresql://
-# Render's URLs often start with postgres://
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+print(f"DATABASE_URL loaded: {'postgresql://.../...@...' if DATABASE_URL.startswith('postgresql') else DATABASE_URL}") # Mask credentials in log
+
+# --- SQLAlchemy Engine Setup ---
+# Note: connect_args={"check_same_thread": False} is ONLY for SQLite. Remove it for PostgreSQL.
+if DATABASE_URL.startswith("postgresql"):
+    # For PostgreSQL, no extra connect_args needed typically
+    engine = create_engine(DATABASE_URL)
+    print("Connecting to PostgreSQL database.")
+elif DATABASE_URL.startswith("sqlite"):
+    # Handle SQLite connection if used as a fallback (ensure path is correct relative to project root)
+    # The path in .env should be relative like 'sqlite:///movies.db'
+    # db_path = os.path.join(os.path.dirname(__file__), '..', DATABASE_URL.split("///")[1]) # Path relative to root
+    # engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    # Simpler if DATABASE_URL is just `sqlite:///movies.db` and run from root:
+    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+    print(f"Connecting to SQLite database at: {DATABASE_URL}")
+else:
+    raise ValueError(f"Unsupported database type in DATABASE_URL: {DATABASE_URL}")
 
 
-engine = create_engine(DATABASE_URL)
+# SessionLocal is used to create database sessions
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+# Base class for SQLAlchemy models (defined in models.py)
 Base = declarative_base()
 
+# --- Dependency to get DB session ---
 def get_db():
+    """FastAPI dependency that provides a SQLAlchemy database session."""
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
-
-def create_tables():
-    print("Creating database tables if they don't exist...")
-    try:
-        # Import models here locally to ensure Base is populated before create_all
-        import models
-        Base.metadata.create_all(bind=engine)
-        print("Tables created successfully (or already exist).")
-    except Exception as e:
-        print(f"Error creating tables: {e}")
-        raise
-
