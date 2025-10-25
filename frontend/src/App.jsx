@@ -1,711 +1,720 @@
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 
 // --- Constants ---
-const API_URL = "http://127.0.0.1:8000";
+const API_URL = "http://127.0.0.1:8000"; // Your FastAPI backend URL
 
-// --- Axios API Client ---
-// Create a global API client instance
-// This is better than using axios.get() everywhere
+// --- Axios Instance with Interceptor ---
+// Create an axios instance
 const apiClient = axios.create({
-  baseURL: API_URL,
+    baseURL: API_URL,
 });
 
-// Use an "interceptor" to automatically add the auth token to every request
+// Add a request interceptor to include the token
 apiClient.interceptors.request.use(
-  (config) => {
-    const token = localStorage.getItem('token');
-    if (token) {
-      // Add the "Authorization: Bearer <token>" header
-      config.headers['Authorization'] = `Bearer ${token}`;
+    (config) => {
+        const token = localStorage.getItem('accessToken');
+        if (token) {
+            config.headers['Authorization'] = `Bearer ${token}`;
+        }
+        return config;
+    },
+    (error) => {
+        // Do something with request error
+        console.error("Axios request interceptor error:", error); // Added console log
+        return Promise.reject(error);
     }
-    return config;
+);
+
+// Add a response interceptor for logging (optional, but helpful for debugging)
+apiClient.interceptors.response.use(
+  (response) => {
+    // console.log("Axios response received:", response); // Uncomment for detailed logs
+    return response;
   },
   (error) => {
+    console.error("Axios response interceptor error:", error.response || error.message); // Added console log
+    // Handle specific errors like 401 Unauthorized globally if needed
+    if (error.response && error.response.status === 401) {
+      console.warn("Unauthorized request - logging out.");
+      // Note: Calling handleLogout directly here might cause issues if it relies on state
+      // It's often better to handle 401s where the call is made or use a global state/context
+      // For simplicity, we'll rely on the checks within the fetch functions for now.
+    }
     return Promise.reject(error);
   }
 );
 
 
-// --- Main App Component (Now an Auth Router) ---
-export default function App() {
-  // Page state: 'login', 'register', or 'app'
-  const [page, setPage] = useState('login'); 
-  const [token, setToken] = useState(localStorage.getItem('token'));
-  const [currentUser, setCurrentUser] = useState(null);
-  const [authLoading, setAuthLoading] = useState(true); // Show spinner on initial load
-
-  // --- Auth Effect ---
-  // On load, check if we have a token and if it's valid
-  useEffect(() => {
-    const validateToken = async () => {
-      if (token) {
-        try {
-          // apiClient automatically uses the token from localStorage
-          // We call the new /users/me endpoint to get our own user details
-          const response = await apiClient.get('/users/me');
-          setCurrentUser(response.data);
-          setPage('app'); // If token is valid, go to the app
-        } catch (error) {
-          // Token is invalid or expired
-          console.error("Token validation failed:", error);
-          localStorage.removeItem('token');
-          setToken(null);
-          setCurrentUser(null);
-          setPage('login'); // Go to login
-        }
-      } else {
-        setPage('login'); // No token, go to login
-      }
-      setAuthLoading(false); // Done checking, hide spinner
-    };
-
-    validateToken();
-  }, [token]); // This effect runs when the app loads or when the token state changes
-
-  // --- Auth Handlers ---
-  
-  const handleLogin = async (email, password) => {
-    try {
-      // FastAPI's OAuth2 expects form data, not JSON
-      const formData = new URLSearchParams();
-      formData.append('username', email); // It expects 'username', but we're sending email
-      formData.append('password', password);
-
-      const response = await apiClient.post('/token/', formData, {
-         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      });
-
-      const newAuthToken = response.data.access_token;
-      localStorage.setItem('token', newAuthToken);
-      setToken(newAuthToken); // This will trigger the useEffect to fetch user and change page
-
-    } catch (error) {
-      console.error("Login failed:", error);
-      // Return the error message to display in the form
-      return error.response?.data?.detail || "An unknown error occurred.";
+// --- Helper Functions ---
+function getPosterUrl(path) {
+    if (!path) {
+        // Return a placeholder if no poster URL exists
+        const placeholderText = "No Poster";
+        return `https://placehold.co/500x750/374151/FFFFFF?text=${encodeURIComponent(placeholderText)}`;
     }
-  };
-
-  const handleRegister = async (username, email, password) => {
-    try {
-      await apiClient.post('/register/', {
-        username,
-        email,
-        password,
-      });
-      // After successful registration, send them to the login page
-      setPage('login');
-      return null; // No error
-
-    } catch (error) {
-      console.error("Registration failed:", error);
-      return error.response?.data?.detail || "An unknown error occurred.";
-    }
-  };
-
-  const handleLogout = () => {
-    localStorage.removeItem('token');
-    setToken(null);
-    setCurrentUser(null);
-    setPage('login'); // Go to login page
-  };
-  
-  // --- Render Logic ---
-
-  if (authLoading) {
-    return <FullPageSpinner />;
-  }
-
-  if (page === 'login') {
-    return <LoginPage onLogin={handleLogin} onGoToRegister={() => setPage('register')} />;
-  }
-
-  if (page === 'register') {
-    return <RegisterPage onRegister={handleRegister} onGoToLogin={() => setPage('login')} />;
-  }
-
-  if (page === 'app' && currentUser) {
-    // We are logged in, show the main MovieApp
-    return <MovieApp user={currentUser} onLogout={handleLogout} />;
-  }
-
-  // Fallback (shouldn't really be reached)
-  return <LoginPage onLogin={handleLogin} onGoToRegister={() => setPage('register')} />;
+    return `https://image.tmdb.org/t/p/w500${path}`;
 }
 
-// ==================================================================
-// --- MAIN MOVIE APPLICATION (Protected) ---
-// This is our old "App" component, now renamed to "MovieApp"
-// ==================================================================
+// --- React Components ---
 
-function MovieApp({ user, onLogout }) {
-  const [recommendations, setRecommendations] = useState([]);
-  const [userRatings, setUserRatings] = useState({});
-  const [selectedMovie, setSelectedMovie] = useState(null);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [searchResults, setSearchResults] = useState([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [errorMessage, setErrorMessage] = useState("");
+// Star Rating Component (No changes needed)
+const StarRating = ({ initialRating = 0, onRatingSubmit, readOnly = false }) => {
+    const [rating, setRating] = useState(initialRating);
+    const [hoverRating, setHoverRating] = useState(0);
 
-  // Fetch initial data (recommendations and user ratings) on page load
-  useEffect(() => {
-    const fetchInitialData = async () => {
-      try {
+    useEffect(() => {
+        setRating(initialRating); // Update rating if initialRating changes
+    }, [initialRating]);
+
+    const handleMouseOver = (index) => {
+        if (!readOnly) setHoverRating(index);
+    };
+
+    const handleMouseLeave = () => {
+        if (!readOnly) setHoverRating(0);
+    };
+
+    const handleClick = (index) => {
+        if (!readOnly) {
+            const newRating = index;
+            setRating(newRating);
+            if (onRatingSubmit) {
+                onRatingSubmit(newRating);
+            }
+        }
+    };
+
+    return (
+        <div className="flex space-x-1">
+            {[1, 2, 3, 4, 5].map((index) => (
+                <svg
+                    key={index}
+                    onMouseOver={() => handleMouseOver(index)}
+                    onMouseLeave={handleMouseLeave}
+                    onClick={() => handleClick(index)}
+                    className={`w-6 h-6 cursor-pointer ${
+                        (hoverRating || rating) >= index
+                            ? 'text-yellow-400'
+                            : 'text-gray-400'
+                    } ${readOnly ? 'cursor-default' : ''}`}
+                    fill="currentColor"
+                    viewBox="0 0 20 20"
+                    xmlns="http://www.w3.org/2000/svg"
+                >
+                    <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.286 3.96a1 1 0 00.95.69h4.162c.969 0 1.371 1.24.588 1.81l-3.366 2.446a1 1 0 00-.364 1.118l1.287 3.96c.3.921-.755 1.688-1.539 1.118l-3.365-2.446a1 1 0 00-1.175 0l-3.366 2.446c-.783.57-1.838-.197-1.539-1.118l1.287-3.96a1 1 0 00-.364-1.118L2.062 9.387c-.783-.57-.38-1.81.588-1.81h4.162a1 1 0 00.95-.69l1.286-3.96z"></path>
+                </svg>
+            ))}
+        </div>
+    );
+};
+
+
+// Movie Card Component (No changes needed)
+const MovieCard = ({ movie, onClick }) => (
+    <div
+        className="bg-gray-700 rounded-lg overflow-hidden shadow-lg cursor-pointer transform hover:scale-105 transition-transform duration-200 flex flex-col h-full"
+        onClick={() => onClick(movie)}
+    >
+        <img
+            src={getPosterUrl(movie.poster_url)}
+            alt={`${movie.title} poster`}
+            className="w-full h-48 sm:h-64 object-cover" // Adjusted height
+            onError={(e) => { // Basic error handling for images
+               e.target.onerror = null;
+               const placeholderText = movie.title || "Movie Poster";
+               e.target.src=`https://placehold.co/500x750/374151/FFFFFF?text=${encodeURIComponent(placeholderText)}`;
+             }}
+        />
+        <div className="p-3 sm:p-4 flex flex-col flex-grow">
+            <h3 className="text-base sm:text-lg font-semibold mb-1 truncate">{movie.title}</h3>
+            <p className="text-xs sm:text-sm text-gray-400 mb-2">{movie.release_year}</p>
+             {/* <p className="text-xs text-gray-400 flex-grow">{movie.genres?.split('|').join(', ')}</p> */}
+        </div>
+    </div>
+);
+
+
+// Movie Modal Component (No changes needed)
+const MovieModal = ({ movie, onClose, onRate, existingRating }) => {
+    const handleRatingSubmit = async (score) => {
+        console.log(`Rating movie ${movie.id} with score ${score}`);
+        try {
+            await onRate(movie.id, score);
+            // Optionally close modal after rating, or show a success message
+             onClose(); // Close modal after successful rating
+        } catch (error) {
+            console.error("Error submitting rating in modal:", error);
+            // Show error to user in the modal? Maybe add an error state here.
+        }
+    };
+
+    return (
+        <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4 overflow-y-auto">
+            <div className="bg-gray-800 rounded-lg shadow-xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+                 {/* Header with Close Button */}
+                <div className="flex justify-between items-center p-4 border-b border-gray-700 sticky top-0 bg-gray-800 z-10 flex-shrink-0">
+                    <h2 className="text-xl md:text-2xl font-semibold truncate pr-4">{movie.title} ({movie.release_year})</h2>
+                    <button
+                        onClick={onClose}
+                        className="text-gray-400 hover:text-white text-3xl font-bold leading-none p-1" // Added padding
+                        aria-label="Close modal"
+                    >
+                        &times;
+                    </button>
+                </div>
+
+                {/* Body Content */}
+                <div className="p-4 md:p-6 md:flex md:space-x-6 overflow-y-auto flex-grow">
+                    {/* Left side: Poster */}
+                    <div className="md:w-1/3 mb-4 md:mb-0 flex-shrink-0">
+                         <img
+                             src={getPosterUrl(movie.poster_url)}
+                             alt={`${movie.title} poster`}
+                             className="w-full h-auto object-contain rounded-lg shadow-md max-h-96" // Contain poster
+                             onError={(e) => { // Consistent error handling
+                                e.target.onerror = null;
+                                const placeholderText = movie.title || "Movie Poster";
+                                e.target.src=`https://placehold.co/500x750/374151/FFFFFF?text=${encodeURIComponent(placeholderText)}`;
+                              }}
+                         />
+                    </div>
+
+                    {/* Right side: Details and Rating */}
+                    <div className="md:w-2/3">
+                        <p className="text-gray-400 mb-2 text-sm">{movie.genres?.split('|').join(', ')}</p>
+                        <p className="text-gray-300 mb-6">{movie.description || "No description available."}</p>
+
+                        <h3 className="text-lg font-semibold mb-2">Rate this movie</h3>
+                        <StarRating
+                            initialRating={existingRating} // Pass existing rating here
+                            onRatingSubmit={handleRatingSubmit}
+                        />
+                         {existingRating > 0 && (
+                            <p className="text-sm text-yellow-400 mt-2">Your rating: {existingRating} stars</p>
+                        )}
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+// --- Main App Component ---
+export default function App() {
+    // --- State Variables ---
+    const [page, setPage] = useState('Loading'); // Start in Loading state
+    const [token, setToken] = useState(null); // Initialize token to null
+    const [currentUser, setCurrentUser] = useState(null);
+    const [recommendations, setRecommendations] = useState([]);
+    const [userRatings, setUserRatings] = useState({}); // Stores ratings as { movie_id: score }
+    const [selectedMovie, setSelectedMovie] = useState(null);
+    const [searchQuery, setSearchQuery] = useState("");
+    const [searchResults, setSearchResults] = useState([]);
+    const [isLoading, setIsLoading] = useState(true); // Combined loading state
+    const [errorMessage, setErrorMessage] = useState("");
+
+    // --- Genre State ---
+    const [genres] = useState([ // Hardcoded, using useState for consistency
+        'Action', 'Adventure', 'Animation', 'Children', 'Comedy', 'Crime',
+        'Documentary', 'Drama', 'Fantasy', 'Film-Noir', 'Horror', 'IMAX',
+        'Musical', 'Mystery', 'Romance', 'Sci-Fi', 'Thriller', 'War', 'Western'
+    ]);
+    const [selectedGenre, setSelectedGenre] = useState(null);
+    const [genreResults, setGenreResults] = useState([]);
+
+    // --- Authentication Logic ---
+
+    // Check localStorage for token on initial mount
+    useEffect(() => {
+        console.log("App mounted. Checking for token...");
+        const storedToken = localStorage.getItem('accessToken');
+        if (storedToken) {
+            console.log("Token found in localStorage.");
+            setToken(storedToken);
+            // We'll fetch the user profile in the next effect
+            setPage('App'); // Assume App page, profile fetch will verify
+        } else {
+            console.log("No token found. Setting page to Login.");
+            setPage('Login');
+            setIsLoading(false); // Not loading if going straight to login
+        }
+    }, []); // Empty dependency array, runs only once on mount
+
+    // Fetch User Profile if token exists and page is App
+    // This effect runs *after* the initial token check
+    useEffect(() => {
+        if (token && page === 'App') {
+            console.log("Token exists and page is App. Fetching user profile...");
+            setIsLoading(true); // Start loading when fetching profile
+            const fetchUserProfile = async () => {
+                try {
+                    const response = await apiClient.get('/users/me');
+                    console.log("User profile fetched successfully:", response.data);
+                    setCurrentUser(response.data);
+                    // Let the data fetching effect handle loading state after this
+                } catch (error) {
+                    console.error("Failed to fetch user profile (token might be invalid):", error);
+                    handleLogout(); // Log out if token is invalid or request fails
+                } finally {
+                    // setIsLoading(false); // Loading is finished by the data fetch effect
+                }
+            };
+            fetchUserProfile();
+        } else if (!token && page !== 'Login' && page !== 'Register') {
+             // If token becomes null unexpectedly while in App, redirect to Login
+             console.log("Token is null, but page is not Login/Register. Logging out.");
+             handleLogout();
+        }
+    }, [token, page]); // Rerun if token or page changes
+
+    // Fetch Initial Data (recommendations and user ratings) *after* user profile is confirmed
+    useEffect(() => {
+        // Only run if we are logged in (token exists), on the App page, AND currentUser profile has been loaded
+        if (token && page === 'App' && currentUser) {
+             console.log("User profile loaded. Fetching initial recommendations and ratings...");
+             setIsLoading(true); // Start loading data
+             setErrorMessage("");
+             setSelectedGenre(null); // Reset genre on initial load/login
+             setSearchResults([]);   // Reset search on initial load/login
+
+             const fetchInitialData = async () => {
+                try {
+                    console.log("Making parallel API calls for recs and ratings...");
+                    // Fetch recommendations and ratings in parallel
+                    const [recsResponse, ratingsResponse] = await Promise.all([
+                        apiClient.get('/recommendations/'),
+                        apiClient.get('/users/me/ratings')
+                    ]);
+                    console.log("Recommendations response:", recsResponse.data);
+                    console.log("Ratings response:", ratingsResponse.data);
+
+                    setRecommendations(recsResponse.data);
+
+                    // Convert ratings array to map { movie_id: score }
+                    const ratingsMap = ratingsResponse.data.reduce((acc, rating) => {
+                        acc[rating.movie_id] = rating.score;
+                        return acc;
+                    }, {});
+                    console.log("Ratings map created:", ratingsMap);
+                    setUserRatings(ratingsMap);
+
+                } catch (error) {
+                    console.error("Failed to fetch initial data (recs/ratings):", error);
+                    setErrorMessage("Could not load recommendations or your ratings.");
+                    if (error.response?.status === 401) {
+                         console.warn("Unauthorized fetching initial data. Logging out.");
+                         handleLogout(); // Log out if unauthorized
+                    }
+                } finally {
+                     console.log("Finished fetching initial data.");
+                     setIsLoading(false); // Stop loading after data is fetched (or fails)
+                }
+            };
+            fetchInitialData();
+        }
+    }, [token, page, currentUser]); // Rerun if user logs in or profile changes
+
+
+    const handleLogin = async (email, password) => {
+        console.log("handleLogin called with email:", email); // Log start
         setIsLoading(true);
         setErrorMessage("");
-        
-        // Use apiClient - it sends the token automatically!
-        const recsResponse = await apiClient.get('/recommendations/');
-        setRecommendations(recsResponse.data);
-        
-        // Use the new /users/me/ratings endpoint
-        const ratingsResponse = await apiClient.get('/users/me/ratings');
-        // Convert array of {movie_id, score} to a fast-lookup map {movie_id: score}
-        const ratingsMap = ratingsResponse.data.reduce((acc, rating) => {
-          acc[rating.movie_id] = rating.score;
-          return acc;
-        }, {});
-        setUserRatings(ratingsMap);
+        try {
+            const formData = new URLSearchParams();
+            formData.append('username', email); // API expects 'username' for the email field
+            formData.append('password', password);
+            console.log("Attempting to POST /token/");
 
-      } catch (err) {
-        console.error("Error fetching initial data:", err);
-        if (err.response && err.response.status === 401) {
-          // Token is bad, force logout
-          onLogout();
-        } else {
-          setErrorMessage("Could not fetch data. Is the backend server running?");
+            // Use the standard axios instance here, not apiClient, as login doesn't need prior auth
+            const response = await axios.post(`${API_URL}/token/`, formData, {
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            });
+            console.log("Login successful:", response.data);
+            const { access_token } = response.data;
+            localStorage.setItem('accessToken', access_token);
+            setToken(access_token); // Update token state
+            // Reset states for the new user session
+            setRecommendations([]);
+            setUserRatings({});
+            setSearchResults([]);
+            setSelectedGenre(null);
+            setGenreResults([]);
+            setCurrentUser(null); // Clear old user profile, let effect fetch new one
+            setPage('App'); // Change page AFTER setting token
+            console.log("Navigating to App page.");
+        } catch (error) {
+            console.error("Login failed:", error.response?.data?.detail || error.message);
+            setErrorMessage(error.response?.data?.detail || "Login failed. Please check credentials.");
+        } finally {
+             console.log("handleLogin finished.");
+             setIsLoading(false); // Stop loading indicator
         }
-      } finally {
-        setIsLoading(false);
-      }
     };
-    
-    fetchInitialData();
-  }, [onLogout]); // Add onLogout to dependency array
 
-  // Fetch search results when searchQuery changes
-  useEffect(() => {
-    if (searchQuery.trim() === "") {
-      setSearchResults([]);
-      return;
-    }
-
-    const fetchSearch = async () => {
-      try {
+    const handleRegister = async (username, email, password) => {
+        console.log("handleRegister called with username:", username, "email:", email); // Log start
+        setIsLoading(true);
         setErrorMessage("");
-        // Use apiClient for public endpoint
-        const response = await apiClient.get('/movies/', {
-          params: { search: searchQuery, limit: 10 }
-        });
-        setSearchResults(response.data);
-      } catch (err) {
-        console.error("Error searching movies:", err);
-        setErrorMessage("Could not fetch search results.");
-      }
+        try {
+             console.log("Attempting to POST /register/");
+             // Use standard axios for registration
+             await axios.post(`${API_URL}/register/`, { username, email, password });
+             console.log("Registration successful.");
+             setErrorMessage("Registration successful! Please login."); // Display success message
+             setPage('Login'); // Go to login page after registration
+        } catch (error) {
+            console.error("Registration failed:", error.response?.data?.detail || error.message);
+            setErrorMessage(error.response?.data?.detail || "Registration failed. Please try again.");
+        } finally {
+             console.log("handleRegister finished.");
+             setIsLoading(false); // Stop loading indicator
+        }
     };
 
-    // Debounce search
-    const delayDebounceFn = setTimeout(() => {
-      fetchSearch();
-    }, 300);
+    // Use useCallback to memoize handleLogout
+    const handleLogout = useCallback(() => {
+        console.log("handleLogout called.");
+        localStorage.removeItem('accessToken');
+        setToken(null);
+        setCurrentUser(null);
+        // Clear all movie/rating data
+        setRecommendations([]);
+        setUserRatings({});
+        setSearchResults([]);
+        setSelectedGenre(null);
+        setGenreResults([]);
+        setErrorMessage("");
+        setSearchQuery("");
+        setPage('Login'); // Ensure navigation back to Login
+        setIsLoading(false); // Ensure loading is stopped
+        console.log("User logged out, state cleared, navigating to Login.");
+    }, []); // No dependencies needed for logout
 
-    return () => clearTimeout(delayDebounceFn);
-  }, [searchQuery]);
 
-
-  // --- API Functions ---
-
-  const handleRating = async (rating) => {
-    setErrorMessage(""); 
-    if (!selectedMovie) return;
-
-    // We no longer need user_id, the token handles it!
-    const newRating = {
-      movie_id: selectedMovie.id,
-      score: rating,
+    // --- Search Logic ---
+    const handleSearch = async (e) => {
+        e.preventDefault();
+        console.log("handleSearch called with query:", searchQuery);
+        if (!searchQuery.trim()) {
+             setSearchResults([]);
+             setSelectedGenre(null); // Clear genre filter if search is empty
+             setErrorMessage("");
+             // No need to refetch recommendations, just clear results
+             console.log("Empty search query, clearing results.");
+            return;
+        }
+        setIsLoading(true);
+        setErrorMessage("");
+        setSelectedGenre(null); // Clear genre when searching
+        setGenreResults([]); // Clear genre results
+        try {
+            console.log(`Searching for: ${searchQuery}`);
+            const response = await apiClient.get(`/movies/?search=${encodeURIComponent(searchQuery)}&limit=50`); // Use apiClient
+            console.log("Search results received:", response.data);
+            setSearchResults(response.data);
+            if (response.data.length === 0) {
+                 setErrorMessage(`No movies found matching "${searchQuery}".`);
+            }
+        } catch (error) {
+            console.error("Search failed:", error);
+            setErrorMessage("Could not perform search.");
+             if (error.response?.status === 401) {
+                 handleLogout(); // Log out if unauthorized
+            }
+        } finally {
+             console.log("handleSearch finished.");
+             setIsLoading(false);
+        }
     };
 
-    try {
-      // Use apiClient
-      const response = await apiClient.post('/ratings/', newRating);
-      
-      // --- Update local state immediately ---
-      setUserRatings(prevRatings => ({
-        ...prevRatings,
-        [selectedMovie.id]: rating,
-      }));
-      
-      // Close modal and refresh recommendations after rating
-      setSelectedMovie(null);
-      
-      // Give the background task a moment to start, then refetch
-      setTimeout(() => {
-        fetchRecommendations(); 
-      }, 1000); // 1 second delay
+    // --- Genre Filter Logic ---
+    const handleGenreSelect = async (genre) => {
+        console.log("handleGenreSelect called with genre:", genre);
+        if (selectedGenre === genre) {
+            // If clicking the same genre again, clear the filter
+            console.log("Clearing genre filter.");
+            setSelectedGenre(null);
+            setGenreResults([]);
+            setSearchResults([]); // Also clear search
+            setErrorMessage("");
+            // Refetch recommendations when clearing genre filter
+            // Let the main data fetching effect handle this by dependency on selectedGenre (or add manual fetch)
+            // For simplicity, we'll rely on the effect for now.
+            return;
+        }
 
-    } catch (err) {
-      console.error("Error submitting rating:", err);
-      if (err.response && err.response.status === 401) {
-        onLogout();
-      } else {
-        setErrorMessage("Could not submit rating.");
-      }
-    }
-  };
-  
-  const fetchRecommendations = async () => {
-    try {
-      setErrorMessage("");
-      // Use apiClient
-      const response = await apiClient.get('/recommendations/');
-      setRecommendations(response.data);
-    } catch (err) {
-      console.error("Error fetching recommendations:", err);
-    }
-  };
+        setIsLoading(true);
+        setErrorMessage("");
+        setSelectedGenre(genre);
+        setSearchQuery(""); // Clear search query
+        setSearchResults([]); // Clear search results
 
-  // --- Render Logic ---
-
-  const moviesToShow = searchQuery.trim() ? searchResults : recommendations;
-  const title = searchQuery.trim() ? "Search Results" : "Recommended For You";
-
-  return (
-    <div className="min-h-screen bg-gray-900 text-white font-sans">
-      <Header 
-        user={user}
-        onLogout={onLogout}
-        searchQuery={searchQuery} 
-        setSearchQuery={setSearchQuery} 
-      />
-
-      <main className="container mx-auto px-4 py-8">
-        {errorMessage && <ErrorMessage message={errorMessage} />}
-        
-        <h2 className="text-3xl font-bold mb-6 flex items-center">
-          <StarIcon /> {title}
-        </h2>
-
-        {isLoading ? (
-          <LoadingSpinner />
-        ) : (
-          <MovieList movies={moviesToShow} onMovieSelect={setSelectedMovie} />
-        )}
-      </main>
-
-      {selectedMovie && (
-        <MovieModal
-          movie={selectedMovie}
-          onClose={() => setSelectedMovie(null)}
-          onRate={handleRating}
-          // Pass the existing rating into the modal
-          existingRating={userRatings[selectedMovie.id] || 0}
-        />
-      )}
-    </div>
-  );
-}
-
-// ==================================================================
-// --- AUTH PAGE COMPONENTS ---
-// ==================================================================
-
-function LoginPage({ onLogin, onGoToRegister }) {
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    setError('');
-    setLoading(true);
-    const apiError = await onLogin(email, password);
-    setLoading(false);
-    if (apiError) {
-      setError(apiError);
-    }
-  };
-
-  return (
-    <div className="min-h-screen bg-gray-900 text-white flex items-center justify-center p-4">
-      <div className="bg-gray-800 p-8 rounded-lg shadow-2xl w-full max-w-md">
-        <div className="text-3xl font-bold text-yellow-400 flex items-center justify-center mb-6">
-          <LogoIcon />
-          MovieRec
-        </div>
-        <h2 className="text-2xl font-bold text-center text-white mb-6">Login to your account</h2>
-        
-        {error && <p className="bg-red-800 text-red-100 p-3 rounded-lg mb-4 text-center">{error}</p>}
-        
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <AuthInput
-            id="email"
-            label="Email"
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            autoComplete="email"
-          />
-          <AuthInput
-            id="password"
-            label="Password"
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            autoComplete="current-password"
-          />
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full bg-yellow-400 text-gray-900 font-bold py-3 px-4 rounded-lg hover:bg-yellow-300 transition-colors disabled:opacity-50"
-          >
-            {loading ? 'Logging in...' : 'Login'}
-          </button>
-        </form>
-        <p className="text-center text-gray-400 mt-6">
-          Don't have an account?{' '}
-          <button onClick={onGoToRegister} className="text-yellow-400 font-semibold hover:underline">
-            Register here
-          </button>
-        </p>
-      </div>
-    </div>
-  );
-}
-
-function RegisterPage({ onRegister, onGoToLogin }) {
-  const [username, setUsername] = useState('');
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    if (password.length < 4) {
-      setError("Password must be at least 4 characters long.");
-      return;
-    }
-    setError('');
-    setLoading(true);
-    const apiError = await onRegister(username, email, password);
-    setLoading(false);
-    if (apiError) {
-      setError(apiError);
-    } else {
-      // If registration is successful (no error), show an alert
-      // and then go to login
-      alert("Registration successful! Please log in.");
-      onGoToLogin();
-    }
-  };
-
-  return (
-    <div className="min-h-screen bg-gray-900 text-white flex items-center justify-center p-4">
-      <div className="bg-gray-800 p-8 rounded-lg shadow-2xl w-full max-w-md">
-        <h2 className="text-3xl font-bold text-center text-yellow-400 mb-6">Create Your Account</h2>
-        
-        {error && <p className="bg-red-800 text-red-100 p-3 rounded-lg mb-4 text-center">{error}</p>}
-        
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <AuthInput
-            id="username"
-            label="Username"
-            type="text"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            autoComplete="username"
-          />
-          <AuthInput
-            id="email"
-            label="Email"
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            autoComplete="email"
-          />
-          <AuthInput
-            id="password"
-            label="Password (min. 4 chars)"
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            autoComplete="new-password"
-          />
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full bg-yellow-400 text-gray-900 font-bold py-3 px-4 rounded-lg hover:bg-yellow-300 transition-colors disabled:opacity-50"
-          >
-            {loading ? 'Registering...' : 'Create Account'}
-          </button>
-        </form>
-        <p className="text-center text-gray-400 mt-6">
-          Already have an account?{' '}
-          <button onClick={onGoToLogin} className="text-yellow-400 font-semibold hover:underline">
-            Login here
-          </button>
-        </p>
-      </div>
-    </div>
-  );
-}
-
-// Re-usable input component for auth forms
-function AuthInput({ id, label, type, value, onChange, autoComplete }) {
-  return (
-    <div>
-      <label htmlFor={id} className="block text-sm font-medium text-gray-300 mb-1">
-        {label}
-      </label>
-      <input
-        id={id}
-        name={id}
-        type={type}
-        required
-        value={value}
-        onChange={onChange}
-        autoComplete={autoComplete}
-        className="w-full bg-gray-700 text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-yellow-400 border border-gray-600"
-      />
-    </div>
-  );
-}
-
-function FullPageSpinner() {
-  return (
-    <div className="min-h-screen bg-gray-900 text-white flex items-center justify-center">
-      <LoadingSpinner />
-    </div>
-  );
-}
+        try {
+            console.log(`Fetching movies for genre: ${genre}`);
+            const response = await apiClient.get(`/movies/?genre=${encodeURIComponent(genre)}&limit=50`); // Use apiClient
+            console.log(`Genre results for ${genre}:`, response.data);
+            setGenreResults(response.data);
+             if (response.data.length === 0) {
+                 setErrorMessage(`No movies found in the "${genre}" genre.`);
+            }
+        } catch (error) {
+            console.error(`Failed to fetch genre ${genre}:`, error);
+            setErrorMessage(`Could not load movies for the "${genre}" genre.`);
+             if (error.response?.status === 401) {
+                 handleLogout(); // Log out if unauthorized
+            }
+        } finally {
+             console.log("handleGenreSelect finished.");
+             setIsLoading(false);
+        }
+    };
 
 
-// ==================================================================
-// --- ORIGINAL APP COMPONENTS (Updated Header) ---
-// (These are all the same as the last version, just included for
-// a complete single-file copy/paste)
-// ==================================================================
+    // --- Rating Logic ---
+    const handleRateMovie = async (movieId, score) => {
+        console.log(`handleRateMovie called for movie ${movieId} with score ${score}`);
+        if (!token) {
+             setErrorMessage("You must be logged in to rate movies.");
+             console.warn("Attempted to rate while logged out.");
+             return Promise.reject("Not logged in"); // Return rejected promise
+        }
+        setErrorMessage(""); // Clear previous errors
+        try {
+            console.log("Attempting to POST /ratings/");
+            const response = await apiClient.post('/ratings/', { movie_id: movieId, score }); // Use apiClient
+            console.log("Rating submitted successfully:", response.data);
+            // Update the local userRatings state immediately for instant feedback
+            setUserRatings(prevRatings => {
+                const newRatings = { ...prevRatings, [movieId]: score };
+                console.log("Updating userRatings state:", newRatings);
+                return newRatings;
+            });
+             return response.data; // Return data on success
 
-function Header({ user, onLogout, searchQuery, setSearchQuery }) {
-  return (
-    <header className="bg-gray-800 shadow-lg sticky top-0 z-50">
-      <nav className="container mx-auto px-4 py-4 flex justify-between items-center">
-        <div className="text-2xl font-bold text-yellow-400 flex items-center">
-          <LogoIcon />
-          MovieRec
-        </div>
-        <div className="flex items-center space-x-4">
-          <div className="w-full max-w-xs">
-            <div className="relative">
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search for movies..."
-                className="w-full bg-gray-700 text-white px-4 py-2 rounded-full focus:outline-none focus:ring-2 focus:ring-yellow-400"
-              />
-              <SearchIcon />
+        } catch (error) {
+            console.error("Failed to submit rating:", error.response?.data?.detail || error.message);
+            setErrorMessage(error.response?.data?.detail || "Could not submit rating.");
+             if (error.response?.status === 401) {
+                 handleLogout(); // Log out if unauthorized
+            }
+            // Re-throw the error so the modal can know it failed
+            throw error;
+        }
+        // No finally block needed here, let promise resolve/reject
+    };
+
+
+    // --- UI Rendering ---
+
+     // Loading State (before token check completes)
+     if (page === 'Loading') {
+        return <div className="min-h-screen bg-gray-900 text-white flex items-center justify-center">Loading...</div>;
+     }
+
+    // Login Page
+    if (page === 'Login') {
+        return (
+            <div className="min-h-screen bg-gray-900 text-white flex items-center justify-center p-4">
+                <div className="bg-gray-800 p-8 rounded-lg shadow-xl w-full max-w-md">
+                    <h1 className="text-3xl font-bold mb-6 text-center text-yellow-400">MovieRec Login</h1>
+                    {errorMessage && <p className="mb-4 text-center text-red-500 bg-red-900 bg-opacity-30 p-3 rounded">{errorMessage}</p>}
+                    <form onSubmit={(e) => {
+                        e.preventDefault();
+                        const email = e.target.email.value;
+                        const password = e.target.password.value;
+                        handleLogin(email, password);
+                    }}>
+                        <div className="mb-4">
+                            <label className="block text-gray-400 mb-2" htmlFor="email">Email</label>
+                            <input className="w-full p-3 bg-gray-700 rounded text-white focus:outline-none focus:ring-2 focus:ring-yellow-500" type="email" id="email" name="email" required />
+                        </div>
+                        <div className="mb-6">
+                            <label className="block text-gray-400 mb-2" htmlFor="password">Password</label>
+                            <input className="w-full p-3 bg-gray-700 rounded text-white focus:outline-none focus:ring-2 focus:ring-yellow-500" type="password" id="password" name="password" required />
+                        </div>
+                        <button className="w-full bg-yellow-500 hover:bg-yellow-600 text-gray-900 font-bold py-3 px-4 rounded transition duration-200" type="submit" disabled={isLoading}>
+                            {isLoading ? 'Logging in...' : 'Login'}
+                        </button>
+                    </form>
+                    <p className="mt-6 text-center text-gray-400">
+                        Don't have an account? <button className="text-yellow-400 hover:underline" onClick={() => { setErrorMessage(""); setPage('Register'); }}>Register here</button>
+                    </p>
+                </div>
             </div>
-          </div>
-          <div className="text-gray-300">|</div>
-          {/* Show user's name and logout button */}
-          <span className="text-gray-300 hidden sm:block">Welcome, {user.username}!</span>
-          <button
-            onClick={onLogout}
-            className="bg-yellow-400 text-gray-900 font-semibold py-2 px-4 rounded-lg text-sm hover:bg-yellow-300 transition-colors"
-          >
-            Logout
-          </button>
-        </div>
-      </nav>
-    </header>
-  );
-}
+        );
+    }
 
-function MovieList({ movies, onMovieSelect }) {
-  if (movies.length === 0) {
-    return <p className="text-gray-400">No movies found.</p>;
-  }
-  return (
-    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-6">
-      {movies.map(movie => (
-        <MovieCard key={movie.id} movie={movie} onMovieSelect={onMovieSelect} />
-      ))}
-    </div>
-  );
-}
+    // Registration Page
+    if (page === 'Register') {
+        return (
+             <div className="min-h-screen bg-gray-900 text-white flex items-center justify-center p-4">
+                <div className="bg-gray-800 p-8 rounded-lg shadow-xl w-full max-w-md">
+                    <h1 className="text-3xl font-bold mb-6 text-center text-yellow-400">Create Your Account</h1>
+                     {errorMessage && <p className="mb-4 text-center text-red-500 bg-red-900 bg-opacity-30 p-3 rounded">{errorMessage}</p>}
+                    <form onSubmit={(e) => {
+                        e.preventDefault();
+                        const username = e.target.username.value;
+                        const email = e.target.email.value;
+                        const password = e.target.password.value;
+                        handleRegister(username, email, password);
+                    }}>
+                        <div className="mb-4">
+                            <label className="block text-gray-400 mb-2" htmlFor="username">Username</label>
+                            <input className="w-full p-3 bg-gray-700 rounded text-white focus:outline-none focus:ring-2 focus:ring-yellow-500" type="text" id="username" name="username" required />
+                        </div>
+                        <div className="mb-4">
+                            <label className="block text-gray-400 mb-2" htmlFor="email">Email</label>
+                            <input className="w-full p-3 bg-gray-700 rounded text-white focus:outline-none focus:ring-2 focus:ring-yellow-500" type="email" id="email" name="email" required />
+                        </div>
+                        <div className="mb-6">
+                            <label className="block text-gray-400 mb-2" htmlFor="password">Password (min. 4 chars)</label>
+                            <input className="w-full p-3 bg-gray-700 rounded text-white focus:outline-none focus:ring-2 focus:ring-yellow-500" type="password" id="password" name="password" minLength="4" required />
+                        </div>
+                        <button className="w-full bg-yellow-500 hover:bg-yellow-600 text-gray-900 font-bold py-3 px-4 rounded transition duration-200" type="submit" disabled={isLoading}>
+                             {isLoading ? 'Creating Account...' : 'Create Account'}
+                        </button>
+                    </form>
+                    <p className="mt-6 text-center text-gray-400">
+                        Already have an account? <button className="text-yellow-400 hover:underline" onClick={() => { setErrorMessage(""); setPage('Login'); }}>Login here</button>
+                    </p>
+                </div>
+            </div>
+        );
+    }
 
-function MovieCard({ movie, onMovieSelect }) {
-  const mainGenre = movie.genres ? movie.genres.split('|')[0] : 'Movie';
+    // Main App Page (Logged In)
+    if (page === 'App') {
+         // Determine which list of movies to display
+        let moviesToDisplay = [];
+        let sectionTitle = "";
+        let isDisplayingRecommendations = false;
 
-  return (
-    <div
-      onClick={() => onMovieSelect(movie)}
-      className="bg-gray-800 rounded-lg shadow-lg overflow-hidden cursor-pointer transform transition-transform duration-300 hover:scale-105 hover:shadow-yellow-400/20 group"
-    >
-      <div className="aspect-[2/3] w-full bg-gray-700 flex items-center justify-center overflow-hidden">
-        {movie.poster_url ? (
-          <img 
-            src={movie.poster_url} 
-            alt={movie.title} 
-            className="w-full h-full object-cover transition-opacity duration-300 group-hover:opacity-75"
-            onError={(e) => { 
-              // If poster fails to load, hide the img tag to show the fallback
-              e.target.style.display = 'none'; 
-              e.target.parentElement.querySelector('div').style.display = 'flex';
-            }}
-          />
-        ) : null}
-        {/* Fallback if no poster URL or if image fails to load */}
-        <div style={{ display: movie.poster_url ? 'none' : 'flex' }} className="w-full h-full items-center justify-center p-4">
-          <span className="text-lg font-bold text-center text-yellow-400">{movie.title}</span>
-        </div>
-      </div>
-      <div className="p-4">
-        <h3 className="font-bold text-lg truncate" title={movie.title}>{movie.title}</h3>
-        <p className="text-gray-400 text-sm">{movie.release_year ? `${mainGenre} • ${movie.release_year}` : mainGenre}</p>
-      </div>
-    </div>
-  );
-}
+        if (searchResults.length > 0) {
+            moviesToDisplay = searchResults;
+            sectionTitle = `Search Results for "${searchQuery}"`;
+        } else if (selectedGenre) { // Show genre results even if empty, message handles it
+            moviesToDisplay = genreResults;
+            sectionTitle = `Movies in ${selectedGenre}`;
+        } else {
+            moviesToDisplay = recommendations;
+            sectionTitle = "Recommended For You";
+            isDisplayingRecommendations = true;
+        }
 
-function MovieModal({ movie, onClose, onRate, existingRating }) {
-  return (
-    <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4 overflow-y-auto">
-      {/* Click outside to close */}
-      <div className="absolute inset-0 z-[-1]" onClick={onClose}></div>
 
-      <div 
-        className="bg-gray-800 rounded-lg shadow-2xl w-full max-w-lg relative my-8"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <button
-          onClick={onClose}
-          className="absolute top-3 right-3 text-gray-400 hover:text-white text-3xl z-10"
-        >
-          &times;
-        </button>
-        
-        <div className="w-full h-48 bg-gray-700 rounded-t-lg overflow-hidden relative">
-          {movie.poster_url && (
-            <img 
-              src={movie.poster_url} 
-              alt="" 
-              className="w-full h-full object-cover object-top opacity-30"
-            />
-          )}
-           <div className="absolute inset-0 bg-gradient-to-t from-gray-800 via-gray-800/80 to-transparent"></div>
-        </div>
-        
-        <div className="p-8 pt-0 -mt-24 relative z-0">
-          <h2 className="text-3xl font-bold mb-2 text-yellow-400">{movie.title} ({movie.release_year})</h2>
-          <p className="text-gray-400 mb-4">{movie.genres ? movie.genres.split('|').join(', ') : ''}</p>
-          <p className="text-gray-300 mb-6">{movie.description || "No description available."}</p>
-          
-          <div className="bg-gray-700/50 p-4 rounded-lg">
-            <h3 className="text-xl font-semibold mb-3">
-              {existingRating > 0 ? "Update your rating" : "Rate this movie"}
-            </h3>
-            <StarRating initialRating={existingRating} onSetRating={onRate} />
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
+        return (
+            <div className="min-h-screen bg-gray-900 text-white p-4 md:p-8">
+                {/* Header */}
+                <header className="flex flex-col md:flex-row justify-between items-center mb-6 md:mb-10">
+                    <h1 className="text-3xl md:text-4xl font-bold text-yellow-400 mb-4 md:mb-0">🎬 MovieRec</h1>
+                    <div className="flex items-center space-x-4 w-full md:w-auto">
+                        <span className="text-gray-300 hidden sm:inline">Welcome, {currentUser?.username || 'User'}!</span>
+                         {/* Search Form */}
+                         <form onSubmit={handleSearch} className="flex-grow md:flex-grow-0 md:w-64">
+                            <div className="relative">
+                                <input
+                                    type="search"
+                                    placeholder="Search for movies..."
+                                    value={searchQuery}
+                                    onChange={(e) => setSearchQuery(e.target.value)}
+                                    className="w-full p-2 pl-4 pr-10 bg-gray-800 rounded-full text-white border border-gray-700 focus:outline-none focus:ring-2 focus:ring-yellow-500"
+                                />
+                                <button type="submit" className="absolute right-0 top-0 mt-2 mr-3 text-gray-400 hover:text-white">
+                                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+                                </button>
+                            </div>
+                        </form>
+                        <button
+                            onClick={handleLogout}
+                            className="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded transition duration-200"
+                        >
+                            Logout
+                        </button>
+                    </div>
+                </header>
 
-function StarRating({ initialRating = 0, onSetRating }) {
-  const [rating, setRating] = useState(initialRating);
-  const [hoverRating, setHoverRating] = useState(0);
+                 {/* Error Message Display */}
+                 {errorMessage && !isLoading && ( // Show error only if not loading
+                    <div className="mb-6 p-4 bg-red-900 bg-opacity-50 text-red-300 border border-red-700 rounded-lg text-center">
+                        {errorMessage}
+                    </div>
+                )}
 
-  const handleRate = (rate) => {
-    setRating(rate);
-    onSetRating(rate);
-  };
-  
-  // When the modal opens, the initialRating prop might change.
-  // This useEffect ensures the stars update if the prop changes.
-  useEffect(() => {
-    setRating(initialRating);
-  }, [initialRating]);
+                 {/* Genre Filter Buttons */}
+                <div className="mb-8">
+                    <h2 className="text-xl font-semibold mb-4 flex items-center">
+                        {/* Genre Icon */}
+                        Browse by Genre
+                    </h2>
+                    <div className="flex flex-wrap gap-2">
+                        {genres.map(genre => (
+                            <button
+                                key={genre}
+                                onClick={() => handleGenreSelect(genre)}
+                                className={`px-4 py-1 rounded-full text-sm font-medium transition duration-200 ${
+                                    selectedGenre === genre
+                                        ? 'bg-yellow-500 text-gray-900'
+                                        : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+                                }`}
+                                disabled={isLoading} // Disable while loading
+                            >
+                                {genre}
+                            </button>
+                        ))}
+                         {selectedGenre && ( // Show a "Clear Filter" button if a genre is selected
+                            <button
+                                onClick={() => handleGenreSelect(selectedGenre)} // Click again to clear
+                                className="px-4 py-1 rounded-full text-sm font-medium bg-red-600 hover:bg-red-700 text-white transition duration-200"
+                                disabled={isLoading} // Disable while loading
+                            >
+                                Clear Filter &times;
+                            </button>
+                        )}
+                    </div>
+                </div>
 
-  return (
-    <div className="flex items-center space-x-1">
-      {[1, 2, 3, 4, 5].map((star) => (
-        <button
-          key={star}
-          type="button" // Add type="button" to prevent form submission if it's in a form
-          className="bg-transparent border-none p-0 cursor-pointer"
-          onClick={() => handleRate(star)}
-          onMouseEnter={() => setHoverRating(star)}
-          onMouseLeave={() => setHoverRating(0)}
-        >
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 24 24"
-            fill="currentColor"
-            className={`w-10 h-10 transition-colors
-              ${(hoverRating || rating) >= star ? 'text-yellow-400' : 'text-gray-600'}
-            `}
-          >
-            <path
-              fillRule="evenodd"
-              d="M10.788 3.21c.448-1.077 1.976-1.077 2.424 0l2.082 5.007 5.404.433c1.164.093 1.636 1.545.749 2.305l-4.116 3.99.94 5.577c.22 1.303-.959 2.387-2.18 1.758L12 17.314l-4.899 2.99c-1.22.63-2.4-.455-2.18-1.758l.94-5.577-4.116-3.99c-.887-.76-.415-2.212.749-2.305l5.404-.433 2.082-5.007z"
-              clipRule="evenodd"
-            />
-          </svg>
-        </button>
-      ))}
-    </div>
-  );
-}
 
-// --- Utility Components ---
+                {/* Main Content Area: Recommendations or Search Results or Genre Results */}
+                 <section>
+                    <h2 className="text-2xl font-semibold mb-6 flex items-center">
+                        {/* Section Icon */}
+                        {sectionTitle}
+                    </h2>
 
-function LoadingSpinner() {
-  return (
-    <div className="flex justify-center items-center h-64">
-      <div className="animate-spin rounded-full h-16 w-16 border-t-2 border-b-2 border-yellow-400"></div>
-    </div>
-  );
-}
+                    {isLoading ? (
+                        <div className="text-center text-gray-400 text-xl py-10">Loading movies...</div> // Enhanced loading
+                    ) : moviesToDisplay.length > 0 ? (
+                        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 md:gap-6">
+                            {moviesToDisplay.map(movie => (
+                                <MovieCard key={movie.id} movie={movie} onClick={setSelectedMovie} />
+                            ))}
+                        </div>
+                    ) : !errorMessage ? ( // Only show "no movies" if there isn't already an error message
+                        <div className="text-center text-gray-400 py-10">
+                             {selectedGenre ? `No movies found for ${selectedGenre}.`
+                             : searchResults.length === 0 && searchQuery ? `No movies found for "${searchQuery}".`
+                             : isDisplayingRecommendations ? "No recommendations available yet. Try rating some movies!"
+                             : "No movies to display." // Generic fallback
+                            }
+                        </div>
+                    ) : null /* Error message is already displayed above */}
+                 </section>
 
-function ErrorMessage({ message }) {
-  return (
-    <div className="bg-red-800 border border-red-700 text-red-100 px-4 py-3 rounded-lg relative mb-6" role="alert">
-      <strong className="font-bold">Error: </strong>
-      <span className="block sm:inline">{message}</span>
-    </div>
-  );
-}
+                {/* Movie Modal */}
+                {selectedMovie && (
+                    <MovieModal
+                        movie={selectedMovie}
+                        onClose={() => setSelectedMovie(null)}
+                        onRate={handleRateMovie}
+                        existingRating={userRatings[selectedMovie.id] || 0} // Pass existing rating from state map
+                    />
+                )}
+            </div>
+        );
+    }
 
-// --- SVG Icons ---
-
-function LogoIcon() {
-  return (
-    <svg className="w-8 h-8 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 4v16M17 4v16M3 8h4m10 0h4M3 12h18M3 16h4m10 0h4" />
-    </svg>
-  );
-}
-
-function SearchIcon() {
-  return (
-    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400">
-      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-      </svg>
-    </span>
-  );
-}
-
-function StarIcon() {
-  return (
-    <svg className="w-7 h-7 mr-3 text-yellow-400" fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-      <path fillRule="evenodd" d="M10.788 3.21c.448-1.077 1.976-1.077 2.424 0l2.082 5.007 5.404.433c1.164.093 1.636 1.545.749 2.305l-4.116 3.99.94 5.577c.22 1.303-.959 2.387-2.18 1.758L12 17.314l-4.899 2.99c-1.22.63-2.4-.455-2.18-1.758l.94-5.577-4.116-3.99c-.887-.76-.415-2.212.749-2.305l5.404-.433 2.082-5.007z" clipRule="evenodd" />
-    </svg>
-  );
+     // Fallback for unknown page state (should ideally not happen)
+    return <div className="min-h-screen bg-gray-900 text-white flex items-center justify-center">An unexpected error occurred. Please try refreshing.</div>;
 }
 

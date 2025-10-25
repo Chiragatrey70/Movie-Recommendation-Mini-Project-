@@ -4,8 +4,10 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from surprise import Dataset, Reader, SVD
 from surprise.model_selection import train_test_split
-import models # <-- CHANGED THIS LINE
+import models # <-- Absolute import
 from typing import List
+import time # For potential rate limiting if needed in future API calls
+import traceback # Keep traceback for error reporting
 
 # --- Content-Based Filtering ---
 
@@ -15,27 +17,35 @@ def get_content_recommendations(movie_id: int, db: Session, num_recs: int = 10) 
     Based on movie 'genres' and 'description'.
     """
     try:
-        movies = db.query(models.Movie).all() # Use models.Movie
+        movies = db.query(models.Movie).all()
         if not movies:
             return []
-        
+
         movie_data = []
         for movie in movies:
+            text_features = f"{movie.title or ''} {movie.genres or ''} {movie.description or ''}"
             movie_data.append({
                 'id': movie.id,
-                'text_features': f"{movie.title} {movie.genres} {movie.description}"
+                'text_features': text_features.strip()
             })
-        
+
         df = pd.DataFrame(movie_data)
-        
+
         if movie_id not in df['id'].values:
-            print(f"Movie ID {movie_id} not found in database for content filtering.")
+            print(f"Content-Based: Movie ID {movie_id} not found.") # Keep essential warnings
             return []
 
+        try:
+            idx = df.index[df['id'] == movie_id].tolist()[0]
+        except IndexError:
+             print(f"Content-Based: Could not find index for movie_id {movie_id}.") # Keep essential warnings
+             return []
+
         tfidf = TfidfVectorizer(stop_words='english')
+        df['text_features'] = df['text_features'].fillna('')
         tfidf_matrix = tfidf.fit_transform(df['text_features'])
         cosine_sim = cosine_similarity(tfidf_matrix, tfidf_matrix)
-        idx = df.index[df['id'] == movie_id].tolist()[0]
+
         sim_scores = list(enumerate(cosine_sim[idx]))
         sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
         sim_scores = sim_scores[1:num_recs+1]
@@ -45,8 +55,10 @@ def get_content_recommendations(movie_id: int, db: Session, num_recs: int = 10) 
         return recommended_movie_ids
 
     except Exception as e:
-        print(f"Error in content-based recommendations: {e}")
+        print(f"Content-Based: Error during recommendations: {e}")
+        traceback.print_exc() # Keep full traceback for errors
         return []
+
 
 # --- Collaborative Filtering ---
 
@@ -57,11 +69,12 @@ def train_collaborative_model(db: Session):
     Trains the SVD collaborative filtering model on all ratings in the DB.
     """
     global svd_algo
-    print("Training collaborative filtering model...")
-    
-    ratings_query = db.query(models.Rating).all() # Use models.Rating
+    print("Training collaborative filtering model...") # Keep essential status messages
+    start_time = time.time()
+
+    ratings_query = db.query(models.Rating).all()
     if not ratings_query:
-        print("No ratings found in DB to train model.")
+        print("Collaborative: No ratings found in DB to train model.") # Keep essential warnings
         svd_algo = None
         return
 
@@ -71,12 +84,32 @@ def train_collaborative_model(db: Session):
         'score': [r.score for r in ratings_query]
     }
     df = pd.DataFrame(ratings_data)
+
+    if df.empty or not all(col in df.columns for col in ['user_id', 'movie_id', 'score']):
+         print("Collaborative: DataFrame is empty or missing required columns.") # Keep essential warnings
+         svd_algo = None
+         return
+
     reader = Reader(rating_scale=(0.5, 5.0))
-    data = Dataset.load_from_df(df[['user_id', 'movie_id', 'score']], reader)
-    svd_algo = SVD(n_factors=50, n_epochs=20, lr_all=0.005, reg_all=0.02)
-    trainset = data.build_full_trainset()
-    svd_algo.fit(trainset)
-    print("Model training complete.")
+    try:
+        data = Dataset.load_from_df(df[['user_id', 'movie_id', 'score']], reader)
+    except ValueError as e:
+        print(f"Collaborative: Error loading data into Surprise Dataset: {e}") # Keep essential errors
+        svd_algo = None
+        return
+
+    svd_algo_instance = SVD(n_factors=100, n_epochs=30, lr_all=0.005, reg_all=0.04, random_state=42)
+
+    try:
+        trainset = data.build_full_trainset()
+        svd_algo_instance.fit(trainset)
+        svd_algo = svd_algo_instance
+        end_time = time.time()
+        print(f"Model training complete. Time taken: {end_time - start_time:.2f} seconds") # Keep essential status messages
+    except Exception as e:
+        print(f"Collaborative: Error during model training: {e}") # Keep essential errors
+        traceback.print_exc()
+        svd_algo = None
 
 
 def get_collaborative_recommendations(user_id: int, db: Session, num_recs: int = 10) -> List[int]:
@@ -84,38 +117,43 @@ def get_collaborative_recommendations(user_id: int, db: Session, num_recs: int =
     Generates collaborative filtering recommendations for a given user.
     """
     global svd_algo
+
     if svd_algo is None:
-        print("Collaborative model is not trained. Training now...")
-        train_collaborative_model(db)
-        if svd_algo is None:
-            print("Model training failed, cannot provide collaborative recommendations.")
-            return []
+        print("Collaborative: Model not trained or training failed.") # Keep essential warnings
+        return []
 
     try:
-        all_movies = db.query(models.Movie.id).all() # Use models.Movie
-        all_movie_ids = {movie.id for movie in all_movies}
+        trainset = svd_algo.trainset
+        all_movie_inner_ids = trainset.all_items()
+        all_movie_raw_ids = {trainset.to_raw_iid(inner_id) for inner_id in all_movie_inner_ids}
 
-        rated_movies = db.query(models.Rating.movie_id).filter(models.Rating.user_id == user_id).all() # Use models.Rating
-        rated_movie_ids = {rating.movie_id for rating in rated_movies}
+        try:
+            user_inner_id = trainset.to_inner_uid(user_id)
+            rated_inner_ids = {item_inner_id for (item_inner_id, _) in trainset.ur[user_inner_id]}
+            rated_raw_ids = {trainset.to_raw_iid(inner_id) for inner_id in rated_inner_ids}
+        except ValueError:
+            print(f"Collaborative: User {user_id} not found in trainset.") # Keep essential warnings
+            return []
 
-        movies_to_predict = list(all_movie_ids - rated_movie_ids)
-        
-        if not movies_to_predict:
-            print("User has rated all movies, or no movies to predict.")
+        movies_to_predict_raw_ids = list(all_movie_raw_ids - rated_raw_ids)
+
+        if not movies_to_predict_raw_ids:
+            print(f"Collaborative: No unrated movies found for user {user_id}.") # Keep essential warnings
             return []
 
         predictions = []
-        for movie_id in movies_to_predict:
-            pred = svd_algo.predict(uid=str(user_id), iid=str(movie_id))
-            predictions.append((movie_id, pred.est))
+        for raw_movie_id in movies_to_predict_raw_ids:
+            pred = svd_algo.predict(uid=user_id, iid=raw_movie_id)
+            predictions.append((int(raw_movie_id), pred.est))
 
         predictions.sort(key=lambda x: x[1], reverse=True)
         recommended_movie_ids = [movie_id for movie_id, score in predictions[:num_recs]]
-        
+
         return recommended_movie_ids
 
     except Exception as e:
-        print(f"Error in collaborative recommendations: {e}")
+        print(f"Collaborative: Error during recommendations: {e}") # Keep essential errors
+        traceback.print_exc()
         return []
 
 # --- Hybrid Recommendations ---
@@ -126,29 +164,26 @@ def get_hybrid_recommendations(user_id: int, db: Session, num_recs: int = 10) ->
     """
     collab_recs = get_collaborative_recommendations(user_id, db, num_recs)
     content_recs = []
-    
-    top_rating = db.query(models.Rating).filter(models.Rating.user_id == user_id).order_by(models.Rating.score.desc()).first() # Use models.Rating
-    
+    top_rating = db.query(models.Rating).filter(models.Rating.user_id == user_id).order_by(models.Rating.score.desc()).first()
+
     if top_rating:
-        print(f"Getting content recs based on user's top movie (ID: {top_rating.movie_id})")
         content_recs = get_content_recommendations(top_rating.movie_id, db, num_recs)
-    
-    hybrid_recs = []
-    
+
+    hybrid_recs_set = set()
+    hybrid_recs_list = []
+
     for rec_id in collab_recs:
-        if rec_id not in hybrid_recs:
-            hybrid_recs.append(rec_id)
-    
+        if rec_id not in hybrid_recs_set:
+            hybrid_recs_set.add(rec_id)
+            hybrid_recs_list.append(rec_id)
+
     for rec_id in content_recs:
-        if rec_id not in hybrid_recs and len(hybrid_recs) < num_recs:
-            hybrid_recs.append(rec_id)
+        if rec_id not in hybrid_recs_set and len(hybrid_recs_list) < num_recs:
+            hybrid_recs_set.add(rec_id)
+            hybrid_recs_list.append(rec_id)
 
-    if len(hybrid_recs) < num_recs:
-        all_recs = collab_recs + content_recs
-        for rec_id in all_recs:
-             if rec_id not in hybrid_recs and len(hybrid_recs) < num_recs:
-                hybrid_recs.append(rec_id)
-
-    print(f"Generated {len(hybrid_recs)} hybrid recommendations.")
-    return hybrid_recs[:num_recs]
+    final_recs = hybrid_recs_list[:num_recs]
+    # Keep one final print statement for confirmation in main.py logs
+    # print(f"Generated {len(final_recs)} hybrid recommendations for user {user_id}.")
+    return final_recs
 
