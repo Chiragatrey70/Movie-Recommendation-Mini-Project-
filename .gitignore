@@ -1,0 +1,32 @@
+# Python / Backend
+venv/
+__pycache__/
+*.pyc
+*.sqlite3
+movies.db # Ignore the SQLite DB file
+
+# Database backup files (if any)
+*.dump
+*.sql
+
+# Environment variables
+.env
+
+# IDE specific files
+.vscode/
+.idea/
+
+# Node / Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+frontend/.env
+frontend/.env.*
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+
+# Operating System files
+.DS_Store
+Thumbs.db
+
